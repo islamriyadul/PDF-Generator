@@ -1,122 +1,101 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { useState } from "react";
 
-function App() {
-  const [count, setCount] = useState(0)
+const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+const TOOLS = [
+  { id: "word-to-pdf", label: "Word → PDF", endpoint: "/convert/word-to-pdf", accept: ".docx", out: ".pdf" },
+  { id: "pdf-to-word", label: "PDF → Word", endpoint: "/convert/pdf-to-word", accept: ".pdf", out: ".docx" },
+  { id: "merge-pdf", label: "Merge PDF", endpoint: "/tools/merge-pdf", accept: ".pdf", out: ".pdf", multiple: true, name: "merged" },
+  { id: "extract", label: "Extract pages", endpoint: "/tools/extract-pages", accept: ".pdf", out: ".pdf", pages: true },
+  { id: "image-to-pdf", label: "Image → PDF", endpoint: "/tools/image-to-pdf", accept: ".jpg,.jpeg,.png", out: ".pdf", multiple: true, name: "images" },
+];
+
+export default function App() {
+  const [tool, setTool] = useState(TOOLS[0]);
+  const [files, setFiles] = useState([]);
+  const [pages, setPages] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const selectTool = (t) => {
+    setTool(t);
+    setFiles([]);
+    setPages("");
+    setError("");
+  };
+
+  const handleConvert = async () => {
+    if (!files.length) return;
+    setLoading(true);
+    setError("");
+    try {
+      const body = new FormData();
+      files.forEach((f) => body.append(tool.multiple ? "files" : "file", f));
+      if (tool.pages) body.append("pages", pages);
+
+      const res = await fetch(`${API}${tool.endpoint}`, { method: "POST", body });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(typeof data.detail === "string" ? data.detail : "Request failed");
+      }
+      const blob = await res.blob();
+      const base = tool.name || files[0].name.replace(/\.[^.]+$/, "");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = base + tool.out;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const disabled = !files.length || loading || (tool.pages && !pages.trim());
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div style={{ maxWidth: 520, margin: "60px auto", fontFamily: "sans-serif" }}>
+      <h1>Pdf Generator</h1>
 
-      <div className="ticks"></div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+        {TOOLS.map((t) => (
+          <button key={t.id} onClick={() => selectTool(t)}
+            style={{ fontWeight: t.id === tool.id ? "bold" : "normal" }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      <input
+        key={tool.id}
+        type="file"
+        accept={tool.accept}
+        multiple={tool.multiple}
+        onChange={(e) => setFiles(Array.from(e.target.files))}
+      />
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+      {files.length > 0 && (
+        <ul>
+          {files.map((f) => (
+            <li key={f.name}>{f.name} ({(f.size / 1024 / 1024).toFixed(2)} MB)</li>
+          ))}
+        </ul>
+      )}
+
+      {tool.pages && (
+        <input
+          placeholder="Pages, e.g. 1-3,5"
+          value={pages}
+          onChange={(e) => setPages(e.target.value)}
+          style={{ display: "block", marginTop: 12 }}
+        />
+      )}
+
+      <button onClick={handleConvert} disabled={disabled} style={{ display: "block", marginTop: 16 }}>
+        {loading ? "Working..." : "Run & Download"}
+      </button>
+      {error && <p style={{ color: "red" }}>{error}</p>}
+    </div>
+  );
 }
-
-export default App

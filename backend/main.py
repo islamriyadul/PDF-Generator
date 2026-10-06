@@ -1,3 +1,6 @@
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from pypdf import PdfReader, PdfWriter
+from PIL import Image
 import shutil
 import subprocess
 import uuid
@@ -83,3 +86,95 @@ def word_to_pdf(background: BackgroundTasks, file: UploadFile = File(...)):
     if result.returncode != 0 or not out.exists():
         raise HTTPException(500, "Conversion failed")
     return FileResponse(out, filename=Path(file.filename).stem + ".pdf")
+def new_job() -> Path:
+    job_dir = TMP_DIR / uuid.uuid4().hex
+    job_dir.mkdir()
+    return job_dir
+
+
+def parse_pages(spec: str, total: int) -> list[int]:
+    """'1-3,5' -> [0, 1, 2, 4] (zero-based, validated)."""
+    pages = []
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                a, b = part.split("-")
+                start, end = int(a), int(b)
+            else:
+                start = end = int(part)
+        except ValueError:
+            raise HTTPException(400, f"Invalid page range: '{part}'")
+        if start < 1 or end < start or end > total:
+            raise HTTPException(400, f"Pages must be between 1 and {total}")
+        pages.extend(range(start - 1, end))
+    if not pages:
+        raise HTTPException(400, "No pages selected")
+    return pages
+
+
+@app.post("/tools/merge-pdf")
+def merge_pdf(background: BackgroundTasks, files: list[UploadFile] = File(...)):
+    if len(files) < 2:
+        raise HTTPException(400, "Upload at least 2 PDF files")
+    job_dir = new_job()
+    background.add_task(cleanup, job_dir)
+    writer = PdfWriter()
+    try:
+        for f in files:
+            if not f.filename.lower().endswith(".pdf"):
+                raise HTTPException(400, f"{f.filename} is not a PDF")
+            writer.append(PdfReader(f.file))
+        out = job_dir / "merged.pdf"
+        with out.open("wb") as fh:
+            writer.write(fh)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Merge failed: {e}")
+    return FileResponse(out, filename="merged.pdf")
+
+
+@app.post("/tools/extract-pages")
+def extract_pages(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    pages: str = Form(...),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Please upload a PDF file")
+    job_dir = new_job()
+    background.add_task(cleanup, job_dir)
+    try:
+        reader = PdfReader(file.file)
+        writer = PdfWriter()
+        for i in parse_pages(pages, len(reader.pages)):
+            writer.add_page(reader.pages[i])
+        out = job_dir / "extracted.pdf"
+        with out.open("wb") as fh:
+            writer.write(fh)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Extraction failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_pages.pdf")
+
+
+@app.post("/tools/image-to-pdf")
+def image_to_pdf(background: BackgroundTasks, files: list[UploadFile] = File(...)):
+    job_dir = new_job()
+    background.add_task(cleanup, job_dir)
+    try:
+        images = []
+        for f in files:
+            if not f.filename.lower().endswith((".jpg", ".jpeg", ".png")):
+                raise HTTPException(400, f"{f.filename} is not a JPG or PNG")
+            images.append(Image.open(f.file).convert("RGB"))
+        out = job_dir / "images.pdf"
+        images[0].save(out, save_all=True, append_images=images[1:])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Conversion failed: {e}")
+    return FileResponse(out, filename="images.pdf")
