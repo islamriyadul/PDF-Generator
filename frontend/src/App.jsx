@@ -5,6 +5,9 @@ const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TOOLS = [
   { id: "word-to-pdf", label: "Word → PDF", endpoint: "/convert/word-to-pdf", accept: ".docx", out: ".pdf" },
   { id: "pdf-to-word", label: "PDF → Word", endpoint: "/convert/pdf-to-word", accept: ".pdf", out: ".docx" },
+  { id: "ppt-to-pdf", label: "PowerPoint → PDF", endpoint: "/convert/powerpoint-to-pdf", accept: ".pptx,.ppt", out: ".pdf" },
+  { id: "excel-to-pdf", label: "Excel → PDF", endpoint: "/convert/excel-to-pdf", accept: ".xlsx,.xls", out: ".pdf" },
+  { id: "html-to-pdf", label: "HTML → PDF", endpoint: "/convert/html-to-pdf", accept: ".html,.htm", out: ".pdf" },
   { id: "merge-pdf", label: "Merge PDF", endpoint: "/tools/merge-pdf", accept: ".pdf", out: ".pdf", multiple: true, name: "merged" },
   { id: "image-to-pdf", label: "Image → PDF", endpoint: "/tools/image-to-pdf", accept: ".jpg,.jpeg,.png", out: ".pdf", multiple: true, name: "images" },
   {

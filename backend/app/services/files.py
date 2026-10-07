@@ -17,11 +17,14 @@ def cleanup(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def save_upload(file: UploadFile, ext: str) -> tuple[Path, Path]:
-    if not file.filename.lower().endswith(ext):
-        raise HTTPException(400, f"Please upload a {ext} file")
+def save_upload(file: UploadFile, exts) -> tuple[Path, Path]:
+    if isinstance(exts, str):
+        exts = (exts,)
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in exts:
+        raise HTTPException(400, f"Please upload a {' or '.join(exts)} file")
     job_dir = new_job()
-    src = job_dir / f"input{ext}"
+    src = job_dir / f"input{suffix}"
     with src.open("wb") as f:
         shutil.copyfileobj(file.file, f)
     if src.stat().st_size > MAX_SIZE:
