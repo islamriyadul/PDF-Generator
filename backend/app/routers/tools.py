@@ -60,3 +60,64 @@ def image_to_pdf(background: BackgroundTasks, files: list[UploadFile] = File(...
     except Exception as e:
         raise HTTPException(500, f"Conversion failed: {e}")
     return FileResponse(out, filename="images.pdf")
+
+@router.post("/rotate-pdf")
+def rotate_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    angle: int = Form(...),
+    pages: str = Form(""),
+):
+    require_ext([file], (".pdf",))
+    if angle not in (90, 180, 270):
+        raise HTTPException(400, "Angle must be 90, 180 or 270")
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "rotated.pdf"
+    try:
+        pdf_ops.rotate_pdf(file.file, angle, pages, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Rotation failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_rotated.pdf")
+
+
+@router.post("/protect-pdf")
+def protect_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    password: str = Form(...),
+):
+    require_ext([file], (".pdf",))
+    if not password:
+        raise HTTPException(400, "Password is required")
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "protected.pdf"
+    try:
+        pdf_ops.protect_pdf(file.file, password, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Protection failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_protected.pdf")
+
+
+@router.post("/unlock-pdf")
+def unlock_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    password: str = Form(...),
+):
+    require_ext([file], (".pdf",))
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "unlocked.pdf"
+    try:
+        pdf_ops.unlock_pdf(file.file, password, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Unlock failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_unlocked.pdf")

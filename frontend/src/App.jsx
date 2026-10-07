@@ -6,32 +6,52 @@ const TOOLS = [
   { id: "word-to-pdf", label: "Word → PDF", endpoint: "/convert/word-to-pdf", accept: ".docx", out: ".pdf" },
   { id: "pdf-to-word", label: "PDF → Word", endpoint: "/convert/pdf-to-word", accept: ".pdf", out: ".docx" },
   { id: "merge-pdf", label: "Merge PDF", endpoint: "/tools/merge-pdf", accept: ".pdf", out: ".pdf", multiple: true, name: "merged" },
-  { id: "extract", label: "Extract pages", endpoint: "/tools/extract-pages", accept: ".pdf", out: ".pdf", pages: true },
   { id: "image-to-pdf", label: "Image → PDF", endpoint: "/tools/image-to-pdf", accept: ".jpg,.jpeg,.png", out: ".pdf", multiple: true, name: "images" },
+  {
+    id: "extract", label: "Extract pages", endpoint: "/tools/extract-pages", accept: ".pdf", out: ".pdf", suffix: "_pages",
+    fields: [{ name: "pages", label: "Pages", type: "text", placeholder: "e.g. 1-3,5", required: true }],
+  },
+  {
+    id: "rotate", label: "Rotate PDF", endpoint: "/tools/rotate-pdf", accept: ".pdf", out: ".pdf", suffix: "_rotated",
+    fields: [
+      { name: "angle", label: "Rotate clockwise", type: "select", options: ["90", "180", "270"], default: "90" },
+      { name: "pages", label: "Pages (leave empty for all)", type: "text", placeholder: "e.g. 1-3,5" },
+    ],
+  },
+  {
+    id: "protect", label: "Protect PDF", endpoint: "/tools/protect-pdf", accept: ".pdf", out: ".pdf", suffix: "_protected",
+    fields: [{ name: "password", label: "Set a password", type: "password", required: true }],
+  },
+  {
+    id: "unlock", label: "Unlock PDF", endpoint: "/tools/unlock-pdf", accept: ".pdf", out: ".pdf", suffix: "_unlocked",
+    fields: [{ name: "password", label: "Current password", type: "password", required: true }],
+  },
 ];
+
+const initialValues = (tool) =>
+  Object.fromEntries((tool.fields || []).map((f) => [f.name, f.default || ""]));
 
 export default function App() {
   const [tool, setTool] = useState(TOOLS[0]);
   const [files, setFiles] = useState([]);
-  const [pages, setPages] = useState("");
+  const [values, setValues] = useState(initialValues(TOOLS[0]));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const selectTool = (t) => {
     setTool(t);
     setFiles([]);
-    setPages("");
+    setValues(initialValues(t));
     setError("");
   };
 
-  const handleConvert = async () => {
-    if (!files.length) return;
+  const handleRun = async () => {
     setLoading(true);
     setError("");
     try {
       const body = new FormData();
       files.forEach((f) => body.append(tool.multiple ? "files" : "file", f));
-      if (tool.pages) body.append("pages", pages);
+      (tool.fields || []).forEach((f) => body.append(f.name, values[f.name]));
 
       const res = await fetch(`${API}${tool.endpoint}`, { method: "POST", body });
       if (!res.ok) {
@@ -39,7 +59,7 @@ export default function App() {
         throw new Error(typeof data.detail === "string" ? data.detail : "Request failed");
       }
       const blob = await res.blob();
-      const base = tool.name || files[0].name.replace(/\.[^.]+$/, "");
+      const base = tool.name || files[0].name.replace(/\.[^.]+$/, "") + (tool.suffix || "");
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = base + tool.out;
@@ -52,10 +72,11 @@ export default function App() {
     }
   };
 
-  const disabled = !files.length || loading || (tool.pages && !pages.trim());
+  const missingField = (tool.fields || []).some((f) => f.required && !values[f.name].trim());
+  const disabled = !files.length || loading || missingField;
 
   return (
-    <div style={{ maxWidth: 520, margin: "60px auto", fontFamily: "sans-serif" }}>
+    <div style={{ maxWidth: 560, margin: "60px auto", fontFamily: "sans-serif" }}>
       <h1>Pdf Generator</h1>
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
@@ -83,16 +104,27 @@ export default function App() {
         </ul>
       )}
 
-      {tool.pages && (
-        <input
-          placeholder="Pages, e.g. 1-3,5"
-          value={pages}
-          onChange={(e) => setPages(e.target.value)}
-          style={{ display: "block", marginTop: 12 }}
-        />
-      )}
+      {(tool.fields || []).map((f) => (
+        <label key={f.name} style={{ display: "block", marginTop: 12 }}>
+          {f.label}
+          <br />
+          {f.type === "select" ? (
+            <select value={values[f.name]}
+              onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}>
+              {f.options.map((o) => <option key={o} value={o}>{o}°</option>)}
+            </select>
+          ) : (
+            <input
+              type={f.type}
+              placeholder={f.placeholder}
+              value={values[f.name]}
+              onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}
+            />
+          )}
+        </label>
+      ))}
 
-      <button onClick={handleConvert} disabled={disabled} style={{ display: "block", marginTop: 16 }}>
+      <button onClick={handleRun} disabled={disabled} style={{ display: "block", marginTop: 16 }}>
         {loading ? "Working..." : "Run & Download"}
       </button>
       {error && <p style={{ color: "red" }}>{error}</p>}
