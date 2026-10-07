@@ -44,7 +44,7 @@ def images_to_pdf(streams: list, out: Path) -> None:
     images = [Image.open(s).convert("RGB") for s in streams]
     images[0].save(out, save_all=True, append_images=images[1:])
 
-    def rotate_pdf(stream, angle: int, spec: str, out: Path) -> None:
+def rotate_pdf(stream, angle: int, spec: str, out: Path) -> None:
     reader = PdfReader(stream)
     writer = PdfWriter()
     total = len(reader.pages)
