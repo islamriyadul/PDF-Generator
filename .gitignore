@@ -1,6 +1,7 @@
 backend/venv/
 backend/tmp/
 __pycache__/
+lo_profile/
 frontend/node_modules/
 frontend/dist/
 .env
