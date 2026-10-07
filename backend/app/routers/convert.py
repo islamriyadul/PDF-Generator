@@ -86,3 +86,36 @@ def pdf_to_jpg(
         raise HTTPException(500, f"Conversion failed: {e}")
     name = Path(file.filename).stem + (".zip" if out.suffix == ".zip" else ".jpg")
     return FileResponse(out, filename=name)
+
+@router.post("/pdf-to-excel")
+def pdf_to_excel(background: BackgroundTasks, file: UploadFile = File(...)):
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "output.xlsx"
+    try:
+        pdf_ops.pdf_to_excel(src, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Conversion failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + ".xlsx")
+
+
+@router.post("/pdf-to-powerpoint")
+def pdf_to_powerpoint(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    mode: str = Form("image"),
+):
+    if mode not in ("image", "editable"):
+        raise HTTPException(400, "Mode must be 'image' or 'editable'")
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "output.pptx"
+    try:
+        pdf_ops.pdf_to_pptx(src, mode, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Conversion failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + ".pptx")

@@ -18,6 +18,17 @@ const TOOLS = [
     id: "extract", label: "Extract pages", endpoint: "/tools/extract-pages", accept: ".pdf", out: ".pdf", suffix: "_pages",
     fields: [{ name: "pages", label: "Pages", type: "text", placeholder: "e.g. 1-3,5", required: true }],
   },
+  { id: "pdf-to-excel", label: "PDF → Excel", endpoint: "/convert/pdf-to-excel", accept: ".pdf", out: ".xlsx" },
+  {
+  id: "pdf-to-ppt", label: "PDF → PowerPoint", endpoint: "/convert/pdf-to-powerpoint", accept: ".pdf", out: ".pptx",
+  fields: [{
+    name: "mode", label: "Output type", type: "select", default: "image",
+    options: [
+      { value: "image", label: "Looks identical (not editable)" },
+      { value: "editable", label: "Editable (text boxes, shapes, tables)" },
+      ],
+    }],
+  },
   {
     id: "rotate", label: "Rotate PDF", endpoint: "/tools/rotate-pdf", accept: ".pdf", out: ".pdf", suffix: "_rotated",
     fields: [
@@ -119,7 +130,11 @@ export default function App() {
           {f.type === "select" ? (
             <select value={values[f.name]}
               onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}>
-              {f.options.map((o) => <option key={o} value={o}>{o}{f.unit || ""}</option>)}
+              {f.options.map((o) => {
+                const v = typeof o === "string" ? o : o.value;
+                const l = typeof o === "string" ? v + (f.unit || "") : o.label;
+                return <option key={v} value={v}>{l}</option>;
+              })}
             </select>
           ) : (
             <input
