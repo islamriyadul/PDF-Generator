@@ -1,3 +1,6 @@
+import zipfile
+
+import pymupdf
 from pathlib import Path
 
 from PIL import Image
@@ -80,3 +83,32 @@ def unlock_pdf(stream, password: str, out: Path) -> None:
         writer.add_page(page)
     with out.open("wb") as fh:
         writer.write(fh)
+
+MAX_IMAGE_PAGES = 50
+
+
+def pdf_to_images(src: Path, dpi: int, job_dir: Path) -> Path:
+    doc = pymupdf.open(src)
+    try:
+        if doc.needs_pass:
+            raise ValueError("This PDF is password protected. Unlock it first")
+        total = doc.page_count
+        if total > MAX_IMAGE_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_IMAGE_PAGES}). Extract fewer pages first")
+        zoom = dpi / 72
+        matrix = pymupdf.Matrix(zoom, zoom)
+
+        if total == 1:
+            out = job_dir / "page_1.jpg"
+            pix = doc[0].get_pixmap(matrix=matrix, alpha=False)
+            out.write_bytes(pix.tobytes("jpg", jpg_quality=90))
+            return out
+
+        out = job_dir / "pages.zip"
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
+            for i, page in enumerate(doc, start=1):
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                z.writestr(f"page_{i}.jpg", pix.tobytes("jpg", jpg_quality=90))
+        return out
+    finally:
+        doc.close()        

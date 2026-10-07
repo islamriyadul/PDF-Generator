@@ -1,11 +1,12 @@
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pdf2docx import Converter
 
 from app.core.config import MAX_SIZE
 from app.services import files as fs
+from app.services import pdf_ops
 from app.services.html_pdf import html_to_pdf
 from app.services.office import office_to_pdf
 
@@ -66,3 +67,22 @@ def html_to_pdf_endpoint(background: BackgroundTasks, file: UploadFile = File(..
     except Exception as e:
         raise HTTPException(500, f"Conversion failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + ".pdf")
+
+@router.post("/pdf-to-jpg")
+def pdf_to_jpg(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    dpi: int = Form(150),
+):
+    if dpi not in (72, 150, 200):
+        raise HTTPException(400, "Quality must be 72, 150 or 200 DPI")
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    try:
+        out = pdf_ops.pdf_to_images(src, dpi, job_dir)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Conversion failed: {e}")
+    name = Path(file.filename).stem + (".zip" if out.suffix == ".zip" else ".jpg")
+    return FileResponse(out, filename=name)

@@ -11,13 +11,17 @@ const TOOLS = [
   { id: "merge-pdf", label: "Merge PDF", endpoint: "/tools/merge-pdf", accept: ".pdf", out: ".pdf", multiple: true, name: "merged" },
   { id: "image-to-pdf", label: "Image → PDF", endpoint: "/tools/image-to-pdf", accept: ".jpg,.jpeg,.png", out: ".pdf", multiple: true, name: "images" },
   {
+    id: "pdf-to-jpg", label: "PDF → JPG", endpoint: "/convert/pdf-to-jpg", accept: ".pdf", out: ".jpg",
+    fields: [{ name: "dpi", label: "Quality", type: "select", options: ["72", "150", "200"], default: "150", unit: " DPI" }],
+  },
+  {
     id: "extract", label: "Extract pages", endpoint: "/tools/extract-pages", accept: ".pdf", out: ".pdf", suffix: "_pages",
     fields: [{ name: "pages", label: "Pages", type: "text", placeholder: "e.g. 1-3,5", required: true }],
   },
   {
     id: "rotate", label: "Rotate PDF", endpoint: "/tools/rotate-pdf", accept: ".pdf", out: ".pdf", suffix: "_rotated",
     fields: [
-      { name: "angle", label: "Rotate clockwise", type: "select", options: ["90", "180", "270"], default: "90" },
+      { name: "angle", label: "Rotate clockwise", type: "select", options: ["90", "180", "270"], default: "90", unit: "°"},
       { name: "pages", label: "Pages (leave empty for all)", type: "text", placeholder: "e.g. 1-3,5" },
     ],
   },
@@ -65,7 +69,8 @@ export default function App() {
       const base = tool.name || files[0].name.replace(/\.[^.]+$/, "") + (tool.suffix || "");
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = base + tool.out;
+      const ext = tool.id === "pdf-to-jpg" ? (blob.type.includes("zip") ? ".zip" : ".jpg") : tool.out;
+      a.download = base + ext;
       a.click();
       URL.revokeObjectURL(a.href);
     } catch (e) {
@@ -114,7 +119,7 @@ export default function App() {
           {f.type === "select" ? (
             <select value={values[f.name]}
               onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}>
-              {f.options.map((o) => <option key={o} value={o}>{o}°</option>)}
+              {f.options.map((o) => <option key={o} value={o}>{o}{f.unit || ""}</option>)}
             </select>
           ) : (
             <input
