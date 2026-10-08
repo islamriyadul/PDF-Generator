@@ -30,6 +30,30 @@ const TOOLS = [
     }],
   },
   {
+    id: "compress", label: "Compress PDF", endpoint: "/tools/compress-pdf", accept: ".pdf", out: ".pdf", suffix: "_compressed",
+    fields: [{
+      name: "level", label: "Compression", type: "select", default: "medium",
+      options: [
+        { value: "low", label: "Low (best quality)" },
+        { value: "medium", label: "Medium (recommended)" },
+        { value: "high", label: "High (smallest file)" },
+      ],
+    }],
+  },
+  {
+    id: "ocr", label: "OCR PDF", endpoint: "/tools/ocr-pdf", accept: ".pdf", out: ".pdf", suffix: "_ocr",
+    fields: [{
+      name: "lang", label: "Document language", type: "select", default: "eng",
+      options: [
+        { value: "eng", label: "English" },
+        { value: "ben", label: "Bengali" },
+        { value: "eng+ben", label: "English + Bengali" },
+      ],
+    }],
+  },
+  { id: "repair", label: "Repair PDF", endpoint: "/tools/repair-pdf", accept: ".pdf", out: ".pdf", suffix: "_repaired" },
+  
+  {
     id: "rotate", label: "Rotate PDF", endpoint: "/tools/rotate-pdf", accept: ".pdf", out: ".pdf", suffix: "_rotated",
     fields: [
       { name: "angle", label: "Rotate clockwise", type: "select", options: ["90", "180", "270"], default: "90", unit: "°"},
