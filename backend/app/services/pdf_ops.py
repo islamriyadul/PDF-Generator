@@ -1,17 +1,17 @@
+import base64
 import io
+import json
 import re
-
-from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
-from openpyxl import Workbook
-from pptx import Presentation
-from pptx.util import Emu, Pt
 import zipfile
-
-import pymupdf
 from pathlib import Path
 
+import pymupdf
+from openpyxl import Workbook
 from PIL import Image
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+from pptx.util import Emu, Pt
 from pypdf import PdfReader, PdfWriter
 
 
@@ -390,4 +390,88 @@ def split_pdf(stream, mode: str, value: str, out: Path) -> None:
             buf = io.BytesIO()
             writer.write(buf)
             label = f"{pages[0] + 1}" if len(pages) == 1 else f"{pages[0] + 1}-{pages[-1] + 1}"
-            z.writestr(f"part_{k}_pages_{label}.pdf", buf.getvalue())        
+            z.writestr(f"part_{k}_pages_{label}.pdf", buf.getvalue())  
+
+MAX_ORGANIZE_PAGES = 100
+MAX_ORGANIZE_SOURCES = 10
+
+
+def pdf_thumbnails(src: Path, width: int = 220) -> list[dict]:
+    try:
+        doc = pymupdf.open(src)
+    except Exception:
+        raise ValueError("This file is not a valid PDF")
+    try:
+        if doc.needs_pass:
+            raise ValueError("This PDF is password protected. Unlock it first")
+        if doc.page_count > MAX_ORGANIZE_PAGES:
+            raise ValueError(
+                f"Too many pages (max {MAX_ORGANIZE_PAGES}). Split the PDF first"
+            )
+        thumbs = []
+        for page in doc:
+            w, h = max(page.rect.width, 1), max(page.rect.height, 1)
+            zoom = min(width / w, width * 1.5 / h)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            thumbs.append({
+                "img": base64.b64encode(pix.tobytes("jpg", jpg_quality=60)).decode(),
+                "w": round(w, 1),
+                "h": round(h, 1),
+            })
+        return thumbs
+    finally:
+        doc.close()
+
+
+def organize_pdf(streams: list, plan_json: str, out: Path) -> None:
+    try:
+        plan = json.loads(plan_json)
+    except ValueError:
+        raise ValueError("Invalid page plan")
+    if not isinstance(plan, list) or not plan:
+        raise ValueError("Add at least one page")
+    if len(plan) > MAX_ORGANIZE_PAGES * 2:
+        raise ValueError("Too many pages in the result")
+    if not 1 <= len(streams) <= MAX_ORGANIZE_SOURCES:
+        raise ValueError(f"Use between 1 and {MAX_ORGANIZE_SOURCES} files")
+
+    readers = []
+    for s in streams:
+        try:
+            r = PdfReader(s)
+        except Exception:
+            raise ValueError("One of the files is not a valid PDF")
+        if r.is_encrypted:
+            raise ValueError("A PDF is password protected. Unlock it first")
+        if len(r.pages) == 0:
+            raise ValueError("A PDF has no pages")
+        readers.append(r)
+
+    first = readers[0].pages[0]
+    size = (float(first.mediabox.width), float(first.mediabox.height))
+
+    writer = PdfWriter()
+    for item in plan:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid page plan")
+        rot = item.get("rotate", 0)
+        if isinstance(rot, bool) or rot not in (0, 90, 180, 270):
+            raise ValueError("Rotation must be 0, 90, 180 or 270")
+
+        if item.get("blank"):
+            new = writer.add_blank_page(*size)  # same size as the previous real page
+        else:
+            src, page = item.get("src"), item.get("page")
+            if isinstance(src, bool) or not isinstance(src, int) or not 0 <= src < len(readers):
+                raise ValueError("Invalid page plan")
+            total = len(readers[src].pages)
+            if isinstance(page, bool) or not isinstance(page, int) or not 1 <= page <= total:
+                raise ValueError(f"Pages must be between 1 and {total}")
+            source_page = readers[src].pages[page - 1]
+            size = (float(source_page.mediabox.width), float(source_page.mediabox.height))
+            new = writer.add_page(source_page)
+        if rot:
+            new.rotate(rot)  # rotate the copy, so duplicates stay independent
+
+    with out.open("wb") as fh:
+        writer.write(fh)                  

@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from app.services import pdf_tools
 from app.services import files as fs
 from app.services import pdf_ops
+from app.core.config import MAX_SIZE
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -241,3 +242,25 @@ def split_pdf(
     except Exception as e:
         raise HTTPException(500, f"Split failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + "_split.zip")
+
+@router.post("/organize-pdf")
+def organize_pdf(
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    plan: str = Form(...),
+):
+    require_ext(files, (".pdf",))
+    for f in files:
+        if f.size and f.size > MAX_SIZE:
+            raise HTTPException(413, f"{f.filename} is too large (max 20 MB)")
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "organized.pdf"
+    try:
+        pdf_ops.organize_pdf([f.file for f in files], plan, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Organize failed: {e}")
+    name = Path(files[0].filename).stem + "_organized.pdf"
+    return FileResponse(out, filename=name)
