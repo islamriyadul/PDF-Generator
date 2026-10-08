@@ -2,7 +2,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-
+from app.services import pdf_tools
 from app.services import files as fs
 from app.services import pdf_ops
 
@@ -60,6 +60,10 @@ def image_to_pdf(background: BackgroundTasks, files: list[UploadFile] = File(...
     except Exception as e:
         raise HTTPException(500, f"Conversion failed: {e}")
     return FileResponse(out, filename="images.pdf")
+
+@router.get("/ocr-languages")
+def ocr_languages():
+    return pdf_tools.list_ocr_languages()
 
 @router.post("/rotate-pdf")
 def rotate_pdf(
@@ -121,3 +125,61 @@ def unlock_pdf(
     except Exception as e:
         raise HTTPException(500, f"Unlock failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + "_unlocked.pdf")
+
+@router.post("/compress-pdf")
+def compress_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    level: str = Form("medium"),
+):
+    require_ext([file], (".pdf",))
+    if level not in ("low", "medium", "high"):
+        raise HTTPException(400, "Level must be low, medium or high")
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "compressed.pdf"
+    try:
+        pdf_tools.compress_pdf(src, level, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return FileResponse(out, filename=Path(file.filename).stem + "_compressed.pdf")
+
+
+@router.post("/repair-pdf")
+def repair_pdf(background: BackgroundTasks, file: UploadFile = File(...)):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "repaired.pdf"
+    try:
+        pdf_tools.repair_pdf(src, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return FileResponse(out, filename=Path(file.filename).stem + "_repaired.pdf")
+
+
+@router.post("/ocr-pdf")
+def ocr_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    lang: str = Form("eng"),
+):
+    require_ext([file], (".pdf",))
+    requested = lang.split("+")
+    installed = set(pdf_tools.list_ocr_langs())
+    if not (1 <= len(requested) <= 3) or any(l not in installed for l in requested):
+        raise HTTPException(400, "Unsupported language")
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "ocr.pdf"
+    try:
+        pdf_tools.ocr_pdf(src, lang, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return FileResponse(out, filename=Path(file.filename).stem + "_ocr.pdf")

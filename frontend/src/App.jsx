@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect,useState } from "react";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -44,15 +44,12 @@ const TOOLS = [
     id: "ocr", label: "OCR PDF", endpoint: "/tools/ocr-pdf", accept: ".pdf", out: ".pdf", suffix: "_ocr",
     fields: [{
       name: "lang", label: "Document language", type: "select", default: "eng",
-      options: [
-        { value: "eng", label: "English" },
-        { value: "ben", label: "Bengali" },
-        { value: "eng+ben", label: "English + Bengali" },
-      ],
+      optionsUrl: "/tools/ocr-languages",
+      options: [{ value: "eng", label: "English" }], // shown until the list loads
     }],
   },
   { id: "repair", label: "Repair PDF", endpoint: "/tools/repair-pdf", accept: ".pdf", out: ".pdf", suffix: "_repaired" },
-  
+
   {
     id: "rotate", label: "Rotate PDF", endpoint: "/tools/rotate-pdf", accept: ".pdf", out: ".pdf", suffix: "_rotated",
     fields: [
@@ -79,6 +76,21 @@ export default function App() {
   const [values, setValues] = useState(initialValues(TOOLS[0]));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [remote, setRemote] = useState({});
+  useEffect(() => {
+  (tool.fields || []).forEach((f) => {
+    if (f.optionsUrl && !remote[f.name]) {
+      fetch(`${API}${f.optionsUrl}`)
+        .then((r) => (r.ok ? r.json() : Promise.reject()))
+        .then((list) => {
+          if (Array.isArray(list) && list.length) {
+            setRemote((p) => ({ ...p, [f.name]: list }));
+          }
+        })
+        .catch(() => {}); 
+    }
+  });
+}, [tool]);
 
   const selectTool = (t) => {
     setTool(t);
@@ -154,7 +166,7 @@ export default function App() {
           {f.type === "select" ? (
             <select value={values[f.name]}
               onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}>
-              {f.options.map((o) => {
+              {(f.optionsUrl ? remote[f.name] || f.options : f.options).map((o) => {
                 const v = typeof o === "string" ? o : o.value;
                 const l = typeof o === "string" ? v + (f.unit || "") : o.label;
                 return <option key={v} value={v}>{l}</option>;
