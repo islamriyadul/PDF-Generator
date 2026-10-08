@@ -65,6 +65,35 @@ const TOOLS = [
     id: "unlock", label: "Unlock PDF", endpoint: "/tools/unlock-pdf", accept: ".pdf", out: ".pdf", suffix: "_unlocked",
     fields: [{ name: "password", label: "Current password", type: "password", required: true }],
   },
+  {
+    id: "pdf-to-pdfa", label: "PDF → PDF/A", endpoint: "/tools/pdf-to-pdfa", accept: ".pdf", out: ".pdf", suffix: "_pdfa",
+    fields: [{
+      name: "part", label: "PDF/A version", type: "select", default: "2",
+      options: [
+        { value: "2", label: "PDF/A-2b (recommended)" },
+        { value: "1", label: "PDF/A-1b (oldest, most compatible)" },
+        { value: "3", label: "PDF/A-3b (allows attachments)" },
+      ],
+    }],
+  },
+  {
+  id: "remove-pages", label: "Remove pages", endpoint: "/tools/remove-pages", accept: ".pdf", out: ".pdf", suffix: "_edited",
+  fields: [{ name: "pages", label: "Pages to remove", type: "text", placeholder: "e.g. 2,5-7", required: true }],
+  },
+  {
+    id: "split", label: "Split PDF", endpoint: "/tools/split-pdf", accept: ".pdf", out: ".zip", suffix: "_split",
+    fields: [
+      {
+        name: "mode", label: "Split by", type: "select", default: "ranges",
+        options: [
+          { value: "ranges", label: "Custom ranges" },
+          { value: "n", label: "Every N pages" },
+          { value: "every", label: "Every page (one file per page)" },
+        ],
+      },
+      { name: "value", label: "Ranges (1-3,4-6,7) or N (e.g. 2). Ignored for 'Every page'", type: "text", placeholder: "e.g. 1-3,4-6,7" },
+    ],
+  },
 ];
 
 const initialValues = (tool) =>

@@ -321,3 +321,73 @@ def pdf_to_pptx(src: Path, mode: str, out: Path) -> None:
         prs.save(out)
     finally:
         doc.close()
+
+MAX_SPLIT_FILES = 200
+
+
+def _safe_pages(spec: str, total: int) -> list[int]:
+    try:
+        return parse_pages(spec, total)
+    except ValueError as e:
+        if "invalid literal" in str(e):
+            raise ValueError("Use page numbers like 1-3,5")
+        raise
+
+
+def remove_pages(stream, spec: str, out: Path) -> None:
+    reader = PdfReader(stream)
+    if reader.is_encrypted:
+        raise ValueError("This PDF is password protected. Unlock it first")
+    total = len(reader.pages)
+    targets = set(_safe_pages(spec, total))
+    if len(targets) >= total:
+        raise ValueError("You can't remove every page")
+    writer = PdfWriter()
+    for i, page in enumerate(reader.pages):
+        if i not in targets:
+            writer.add_page(page)
+    with out.open("wb") as fh:
+        writer.write(fh)
+
+
+def split_pdf(stream, mode: str, value: str, out: Path) -> None:
+    reader = PdfReader(stream)
+    if reader.is_encrypted:
+        raise ValueError("This PDF is password protected. Unlock it first")
+    total = len(reader.pages)
+
+    if mode == "every":
+        groups = [[i] for i in range(total)]
+    elif mode == "n":
+        try:
+            n = int(value)
+        except ValueError:
+            raise ValueError("Enter a whole number, for example 2")
+        if n < 1:
+            raise ValueError("The number must be 1 or more")
+        groups = [list(range(s, min(s + n, total))) for s in range(0, total, n)]
+    elif mode == "ranges":
+        if not value.strip():
+            raise ValueError("Enter ranges like 1-3,4-6,7")
+        groups = [
+            _safe_pages(part, total)
+            for part in value.replace(" ", "").split(",")
+            if part
+        ]
+    else:
+        raise ValueError("Unknown split mode")
+
+    if not groups:
+        raise ValueError("Nothing to split")
+    if len(groups) > MAX_SPLIT_FILES:
+        raise ValueError(f"Too many files (max {MAX_SPLIT_FILES})")
+
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
+        for k, pages in enumerate(groups, start=1):
+            writer = PdfWriter()
+            for i in pages:
+                writer.add_page(reader.pages[i])
+            buf = io.BytesIO()
+            writer.write(buf)
+            label = f"{pages[0] + 1}" if len(pages) == 1 else f"{pages[0] + 1}-{pages[-1] + 1}"
+            z.writestr(f"part_{k}_pages_{label}.pdf", buf.getvalue())        

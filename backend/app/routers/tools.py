@@ -183,3 +183,61 @@ def ocr_pdf(
     except Exception as e:
         raise HTTPException(500, str(e))
     return FileResponse(out, filename=Path(file.filename).stem + "_ocr.pdf")
+
+@router.post("/pdf-to-pdfa")
+def pdf_to_pdfa(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    part: int = Form(2),
+):
+    require_ext([file], (".pdf",))
+    if part not in (1, 2, 3):
+        raise HTTPException(400, "PDF/A part must be 1, 2 or 3")
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "pdfa.pdf"
+    try:
+        pdf_tools.pdf_to_pdfa(src, part, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return FileResponse(out, filename=Path(file.filename).stem + "_pdfa.pdf")
+
+@router.post("/remove-pages")
+def remove_pages(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    pages: str = Form(...),
+):
+    require_ext([file], (".pdf",))
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "removed.pdf"
+    try:
+        pdf_ops.remove_pages(file.file, pages, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Remove failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_edited.pdf")
+
+
+@router.post("/split-pdf")
+def split_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    mode: str = Form("ranges"),
+    value: str = Form(""),
+):
+    require_ext([file], (".pdf",))
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "split.zip"
+    try:
+        pdf_ops.split_pdf(file.file, mode, value, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Split failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_split.zip")

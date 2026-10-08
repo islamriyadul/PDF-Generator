@@ -270,3 +270,43 @@ def list_ocr_languages() -> list[dict]:
         for code in list_ocr_langs()
         if code in LANG_NAMES
     ]
+
+def pdf_to_pdfa(src: Path, part: int, out: Path) -> None:
+    _check_open(src)
+    gs = find_gs()
+    if not gs:
+        raise RuntimeError("Ghostscript is not installed on the server")
+
+    gs_root = Path(gs).parent.parent  # ...\gs\gs10.08.0
+    icc = gs_root / "iccprofiles" / "default_rgb.icc"
+    if not icc.exists():
+        raise RuntimeError("Ghostscript colour profile not found")
+
+    # PDF/A needs an output intent that points to a colour profile
+    def_ps = out.parent / "pdfa_def.ps"
+    def_ps.write_text(
+        "%!\n"
+        "[/_objdef {icc_PDFA} /type /stream /OBJ pdfmark\n"
+        "[{icc_PDFA} <</N 3>> /PUT pdfmark\n"
+        f"[{{icc_PDFA}} ({icc.as_posix()}) (r) file /PUT pdfmark\n"
+        "[/_objdef {OutputIntent_PDFA} /type /dict /OBJ pdfmark\n"
+        "[{OutputIntent_PDFA} <<\n"
+        " /Type /OutputIntent /S /GTS_PDFA1\n"
+        " /DestOutputProfile {icc_PDFA}\n"
+        " /OutputConditionIdentifier (sRGB)\n"
+        ">> /PUT pdfmark\n"
+        "[{Catalog} <</OutputIntents [ {OutputIntent_PDFA} ]>> /PUT pdfmark\n",
+        encoding="ascii",
+    )
+
+    result = subprocess.run(
+        [gs, "-sDEVICE=pdfwrite", f"-dPDFA={part}",
+         "-dPDFACompatibilityPolicy=1", "-sColorConversionStrategy=RGB",
+         "-dNOPAUSE", "-dQUIET", "-dBATCH", "-dSAFER",
+         f"--permit-file-read={icc.as_posix()}",
+         f"--permit-file-read={def_ps.as_posix()}",
+         f"-sOutputFile={out}", str(def_ps), str(src)],
+        capture_output=True, timeout=180,
+    )
+    if result.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError("PDF/A conversion failed")
