@@ -264,3 +264,70 @@ def organize_pdf(
         raise HTTPException(500, f"Organize failed: {e}")
     name = Path(files[0].filename).stem + "_organized.pdf"
     return FileResponse(out, filename=name)
+
+@router.post("/pdf-thumbnails")
+def pdf_thumbnails(background: BackgroundTasks, file: UploadFile = File(...)):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    try:
+        return {"pages": pdf_ops.pdf_thumbnails(src)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Preview failed: {e}")
+
+@router.post("/pdf-pages")
+def pdf_pages(background: BackgroundTasks, file: UploadFile = File(...)):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    try:
+        return {"pages": pdf_ops.pdf_pages(src)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Preview failed: {e}")
+
+
+@router.post("/sign-pdf")
+def sign_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    signature: UploadFile = File(...),
+    placements: str = Form(...),
+):
+    require_ext([file], (".pdf",))
+    require_ext([signature], (".png",))
+    sig_bytes = signature.file.read(2 * 1024 * 1024 + 1)
+    if len(sig_bytes) > 2 * 1024 * 1024:
+        raise HTTPException(413, "Signature image is too large (max 2 MB)")
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "signed.pdf"
+    try:
+        pdf_ops.sign_pdf(src, sig_bytes, placements, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Signing failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_signed.pdf")
+
+
+@router.post("/compare-pdf")
+def compare_pdf(
+    background: BackgroundTasks,
+    file_a: UploadFile = File(...),
+    file_b: UploadFile = File(...),
+):
+    require_ext([file_a, file_b], (".pdf",))
+    job_a, src_a = fs.save_upload(file_a, ".pdf")
+    background.add_task(fs.cleanup, job_a)
+    job_b, src_b = fs.save_upload(file_b, ".pdf")
+    background.add_task(fs.cleanup, job_b)
+    try:
+        return pdf_ops.compare_pdfs(src_a, src_b)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Compare failed: {e}")    

@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import re
+import difflib
 import zipfile
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.util import Emu, Pt
 from pypdf import PdfReader, PdfWriter
+from PIL import Image, ImageChops, ImageDraw
 
 
 def parse_pages(spec: str, total: int) -> list[int]:
@@ -474,4 +476,185 @@ def organize_pdf(streams: list, plan_json: str, out: Path) -> None:
             new.rotate(rot)  # rotate the copy, so duplicates stay independent
 
     with out.open("wb") as fh:
-        writer.write(fh)                  
+        writer.write(fh)                 
+
+
+MAX_SIGN_PAGES = 30
+MAX_SIGNATURES = 50
+MAX_COMPARE_PAGES = 30
+
+
+def _open_checked(path: Path):
+    try:
+        doc = pymupdf.open(path)
+    except Exception:
+        raise ValueError("This file is not a valid PDF")
+    if doc.needs_pass:
+        doc.close()
+        raise ValueError("A PDF is password protected. Unlock it first")
+    return doc
+
+
+def pdf_pages(src: Path, width: int = 700) -> list[dict]:
+    doc = _open_checked(src)
+    try:
+        if doc.page_count > MAX_SIGN_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_SIGN_PAGES}). Extract fewer pages first")
+        pages = []
+        for page in doc:
+            zoom = width / max(page.rect.width, 1)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            pages.append({
+                "img": base64.b64encode(pix.tobytes("jpg", jpg_quality=75)).decode(),
+                "w": round(page.rect.width, 1),
+                "h": round(page.rect.height, 1),
+            })
+        return pages
+    finally:
+        doc.close()
+
+
+def _num(v, lo, hi):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+        raise ValueError("Invalid signature position")
+    return float(v)
+
+
+def sign_pdf(src: Path, sig_bytes: bytes, placements_json: str, out: Path) -> None:
+    try:
+        items = json.loads(placements_json)
+    except ValueError:
+        raise ValueError("Invalid placement data")
+    if not isinstance(items, list) or not items:
+        raise ValueError("Place your signature on a page first")
+    if len(items) > MAX_SIGNATURES:
+        raise ValueError(f"Too many signatures (max {MAX_SIGNATURES})")
+
+    try:
+        sig = Image.open(io.BytesIO(sig_bytes))
+        if sig.width * sig.height > 4_000_000:
+            raise ValueError("Signature image is too large")
+        sig.load()
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("The signature image is not valid")
+    sig = sig.convert("RGBA")
+    box = sig.getchannel("A").getbbox()
+    if not box:
+        raise ValueError("The signature is empty")
+    sig = sig.crop(box)
+
+    doc = _open_checked(src)
+    try:
+        cache = {}
+        for it in items:
+            if not isinstance(it, dict):
+                raise ValueError("Invalid placement data")
+            pno = it.get("page")
+            if isinstance(pno, bool) or not isinstance(pno, int) or not 1 <= pno <= doc.page_count:
+                raise ValueError(f"Pages must be between 1 and {doc.page_count}")
+            xf, yf = _num(it.get("x"), 0, 1), _num(it.get("y"), 0, 1)
+            wf = _num(it.get("w"), 0.02, 1)
+
+            page = doc[pno - 1]
+            W, H = page.rect.width, page.rect.height
+            w = wf * W
+            h = w * sig.height / sig.width
+            if h > H:
+                h, w = H, H * sig.width / sig.height
+            x0 = min(max(xf * W, 0), W - w)
+            y0 = min(max(yf * H, 0), H - h)
+            rect = pymupdf.Rect(x0, y0, x0 + w, y0 + h) * page.derotation_matrix
+            rect.normalize()
+
+            rot = page.rotation
+            if rot not in cache:  # turn the image so it looks upright on rotated pages
+                img = sig.rotate(rot, expand=True) if rot else sig
+                buf = io.BytesIO()
+                img.save(buf, "PNG")
+                cache[rot] = buf.getvalue()
+            page.insert_image(rect, stream=cache[rot])
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+
+def _render(page, width):
+    zoom = width / max(page.rect.width, 1)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples), pymupdf.Matrix(zoom, zoom)
+
+
+def _words(page):
+    return [(pymupdf.Rect(w[:4]) * page.rotation_matrix, w[4]) for w in page.get_text("words")]
+
+
+def _highlight(img, rects, color):
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    for r in rects:
+        draw.rectangle([r.x0, r.y0, r.x1, r.y1], fill=color)
+    return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+
+
+def _b64(img) -> str:
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=70)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def compare_pdfs(path_a: Path, path_b: Path, width: int = 500) -> dict:
+    doc_a, doc_b = _open_checked(path_a), None
+    try:
+        doc_b = _open_checked(path_b)
+        na, nb = doc_a.page_count, doc_b.page_count
+        if max(na, nb) > MAX_COMPARE_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_COMPARE_PAGES} per file)")
+
+        pages, removed_total, added_total, changed_pages = [], 0, 0, 0
+        for i in range(max(na, nb)):
+            entry = {"page": i + 1, "a": None, "b": None,
+                     "removed": 0, "added": 0, "visual": 0.0}
+            pa = doc_a[i] if i < na else None
+            pb = doc_b[i] if i < nb else None
+
+            if pa and pb:
+                img_a, mat_a = _render(pa, width)
+                img_b, mat_b = _render(pb, width)
+                wa, wb = _words(pa), _words(pb)
+                sm = difflib.SequenceMatcher(None, [t for _, t in wa], [t for _, t in wb], autojunk=False)
+                rem, add = [], []
+                for tag, i1, i2, j1, j2 in sm.get_opcodes():
+                    if tag in ("replace", "delete"):
+                        rem += [wa[k][0] * mat_a for k in range(i1, i2)]
+                    if tag in ("replace", "insert"):
+                        add += [wb[k][0] * mat_b for k in range(j1, j2)]
+                diff = ImageChops.difference(
+                    img_a.convert("L"), img_b.resize(img_a.size).convert("L")
+                ).point(lambda p: 255 if p > 40 else 0)
+                visual = 100 * diff.histogram()[255] / (diff.width * diff.height)
+                entry.update(
+                    removed=len(rem), added=len(add), visual=round(visual, 2),
+                    a=_b64(_highlight(img_a, rem, (255, 0, 0, 90))),
+                    b=_b64(_highlight(img_b, add, (0, 170, 0, 90))),
+                )
+                entry["changed"] = bool(rem or add or visual > 0.5)
+            else:
+                page, key = (pa, "a") if pa else (pb, "b")
+                entry[key] = _b64(_render(page, width)[0])
+                entry["changed"] = True
+                entry["missing"] = "b" if pa else "a"
+
+            removed_total += entry["removed"]
+            added_total += entry["added"]
+            changed_pages += entry["changed"]
+            pages.append(entry)
+
+        return {"pages_a": na, "pages_b": nb, "changed_pages": changed_pages,
+                "words_removed": removed_total, "words_added": added_total, "pages": pages}
+    finally:
+        doc_a.close()
+        if doc_b:
+            doc_b.close()
+
