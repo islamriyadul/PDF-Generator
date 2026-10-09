@@ -704,3 +704,96 @@ def compare_pdfs(path_a: Path, path_b: Path, width: int = 500) -> dict:
         doc_a.close()
         if doc_b:
             doc_b.close()
+
+# ---------------------------------------------------------------
+# Redact PDF
+# ---------------------------------------------------------------
+MAX_REDACT_PAGES = 30
+MAX_REDACT_TERMS = 50
+MAX_REDACT_BOXES = 500
+MAX_REDACT_AREAS = 5000
+
+REDACT_PATTERNS = {
+    "email": r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+    "phone": r"(?<!\d)\+?\d[\d\s().\-]{7,}\d(?!\d)",
+    "url": r"(?:https?://|www\.)[^\s]+",
+    "card": r"(?<!\d)(?:\d[ \-]?){13,16}(?!\d)",
+}
+
+
+def redact_pdf(src: Path, terms_text: str, pattern_keys: str, boxes_json: str, out: Path) -> int:
+    terms = [t.strip() for t in terms_text.splitlines() if t.strip()]
+    if len(terms) > MAX_REDACT_TERMS:
+        raise ValueError(f"Too many search terms (max {MAX_REDACT_TERMS})")
+    if any(len(t) > 200 for t in terms):
+        raise ValueError("A search term is too long (max 200 characters)")
+
+    keys = [k.strip() for k in pattern_keys.split(",") if k.strip()]
+    if any(k not in REDACT_PATTERNS for k in keys):
+        raise ValueError("Unknown pattern")
+
+    try:
+        boxes = json.loads(boxes_json or "[]")
+    except ValueError:
+        raise ValueError("Invalid box data")
+    if not isinstance(boxes, list) or len(boxes) > MAX_REDACT_BOXES:
+        raise ValueError(f"Too many boxes (max {MAX_REDACT_BOXES})")
+
+    if not terms and not keys and not boxes:
+        raise ValueError("Draw a box, add a search term or choose a pattern first")
+
+    doc = _open_checked(src)
+    try:
+        if doc.page_count > MAX_REDACT_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_REDACT_PAGES}). Extract fewer pages first")
+
+        by_page = {}
+        for b in boxes:
+            if not isinstance(b, dict):
+                raise ValueError("Invalid box data")
+            pno = b.get("page")
+            if isinstance(pno, bool) or not isinstance(pno, int) or not 1 <= pno <= doc.page_count:
+                raise ValueError(f"Pages must be between 1 and {doc.page_count}")
+            by_page.setdefault(pno, []).append(b)
+
+        total = 0
+        for pno, page in enumerate(doc, start=1):
+            rects = []
+            for t in terms:
+                rects += page.search_for(t)
+
+            if keys:
+                text = page.get_text("text")
+                found = set()
+                for k in keys:
+                    found.update(m.group(0).strip() for m in re.finditer(REDACT_PATTERNS[k], text))
+                for s in found:
+                    rects += page.search_for(s)
+
+            W, H = page.rect.width, page.rect.height  # size as displayed (rotation included)
+            for b in by_page.get(pno, []):
+                x, y = _num(b.get("x"), 0, 1), _num(b.get("y"), 0, 1)
+                w, h = _num(b.get("w"), 0.001, 1), _num(b.get("h"), 0.001, 1)
+                r = pymupdf.Rect(x * W, y * H, min(x + w, 1) * W, min(y + h, 1) * H)
+                r = r * page.derotation_matrix  # displayed -> page coordinates
+                r.normalize()
+                rects.append(r)
+
+            if not rects:
+                continue
+            total += len(rects)
+            if total > MAX_REDACT_AREAS:
+                raise ValueError("Too many areas to redact. Use more specific terms")
+            for r in rects:
+                page.add_redact_annot(r, fill=(0, 0, 0))
+            page.apply_redactions(images=2)  # 2 = also blank image pixels under the box
+
+        if total == 0:
+            raise ValueError("Nothing found to redact. Check your search terms or draw a box")
+
+        doc.set_metadata({})
+        doc.del_xml_metadata()
+        doc.save(out, garbage=4, deflate=True, clean=True)
+        return total
+    finally:
+        doc.close()            

@@ -3,6 +3,7 @@ import { Link, Route, Routes, useParams } from "react-router-dom";
 import Organizer from "./Organizer";
 import SignPdf from "./SignPdf";
 import Comparer from "./Comparer";
+import Redactor from "./Redactor";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -107,6 +108,7 @@ const TOOLS = [
   // ---- Edit ----
   { id: "sign-pdf", cat: "Edit", label: "Sign PDF", desc: "Draw, type or upload your signature", custom: "sign" },
   { id: "compare-pdf", cat: "Edit", label: "Compare PDF", desc: "See what changed between two files", custom: "compare" },
+  { id: "redact-pdf", cat: "Security", label: "Redact PDF", desc: "Permanently black out sensitive text", custom: "redact" },
 ];
 
 const initialValues = (tool) =>
@@ -266,7 +268,7 @@ function ToolPage() {
     );
   }
 
-  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer /> };
+  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer />, redact: <Redactor /> };
 
   return (
     <div style={{ maxWidth: tool.custom ? 1100 : 560, margin: "30px auto", padding: "0 16px" }}>
