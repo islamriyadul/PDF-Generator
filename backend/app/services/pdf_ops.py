@@ -1,22 +1,24 @@
 import base64
+import difflib
 import io
 import json
 import re
-import difflib
 import zipfile
 from pathlib import Path
 
 import pymupdf
 from openpyxl import Workbook
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.util import Emu, Pt
 from pypdf import PdfReader, PdfWriter
-from PIL import Image, ImageChops, ImageDraw
 
 
+# ---------------------------------------------------------------
+# Basic page tools
+# ---------------------------------------------------------------
 def parse_pages(spec: str, total: int) -> list[int]:
     """'1-3,5' -> [0, 1, 2, 4]. Raises ValueError on bad input."""
     pages = []
@@ -57,6 +59,7 @@ def images_to_pdf(streams: list, out: Path) -> None:
     images = [Image.open(s).convert("RGB") for s in streams]
     images[0].save(out, save_all=True, append_images=images[1:])
 
+
 def rotate_pdf(stream, angle: int, spec: str, out: Path) -> None:
     reader = PdfReader(stream)
     writer = PdfWriter()
@@ -94,6 +97,10 @@ def unlock_pdf(stream, password: str, out: Path) -> None:
     with out.open("wb") as fh:
         writer.write(fh)
 
+
+# ---------------------------------------------------------------
+# PDF -> JPG
+# ---------------------------------------------------------------
 MAX_IMAGE_PAGES = 50
 
 
@@ -121,8 +128,12 @@ def pdf_to_images(src: Path, dpi: int, job_dir: Path) -> Path:
                 z.writestr(f"page_{i}.jpg", pix.tobytes("jpg", jpg_quality=90))
         return out
     finally:
-        doc.close()  
+        doc.close()
 
+
+# ---------------------------------------------------------------
+# PDF -> Excel
+# ---------------------------------------------------------------
 MAX_TABLE_PAGES = 100
 _ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
@@ -160,6 +171,10 @@ def pdf_to_excel(src: Path, out: Path) -> None:
     finally:
         doc.close()
 
+
+# ---------------------------------------------------------------
+# PDF -> PowerPoint
+# ---------------------------------------------------------------
 MAX_SHAPES = 400  # keeps heavy vector pages from creating thousands of shapes
 
 
@@ -288,6 +303,8 @@ def _build_editable_slide(page, slide, left, top, scale):
                 run.font.italic = bool(span["flags"] & 2)
                 run.font.name = span["font"].split("+")[-1]
                 run.font.color.rgb = _rgb_int(span["color"])
+
+
 def pdf_to_pptx(src: Path, mode: str, out: Path) -> None:
     doc = pymupdf.open(src)
     try:
@@ -324,6 +341,10 @@ def pdf_to_pptx(src: Path, mode: str, out: Path) -> None:
     finally:
         doc.close()
 
+
+# ---------------------------------------------------------------
+# Split and remove pages
+# ---------------------------------------------------------------
 MAX_SPLIT_FILES = 200
 
 
@@ -392,8 +413,12 @@ def split_pdf(stream, mode: str, value: str, out: Path) -> None:
             buf = io.BytesIO()
             writer.write(buf)
             label = f"{pages[0] + 1}" if len(pages) == 1 else f"{pages[0] + 1}-{pages[-1] + 1}"
-            z.writestr(f"part_{k}_pages_{label}.pdf", buf.getvalue())  
+            z.writestr(f"part_{k}_pages_{label}.pdf", buf.getvalue())
 
+
+# ---------------------------------------------------------------
+# Organize PDF
+# ---------------------------------------------------------------
 MAX_ORGANIZE_PAGES = 100
 MAX_ORGANIZE_SOURCES = 10
 
@@ -476,11 +501,15 @@ def organize_pdf(streams: list, plan_json: str, out: Path) -> None:
             new.rotate(rot)  # rotate the copy, so duplicates stay independent
 
     with out.open("wb") as fh:
-        writer.write(fh)                 
+        writer.write(fh)
 
 
+# ---------------------------------------------------------------
+# Sign PDF and Compare PDF (shared helpers first)
+# ---------------------------------------------------------------
 MAX_SIGN_PAGES = 30
 MAX_SIGNATURES = 50
+MAX_SIGN_IMAGES = 10
 MAX_COMPARE_PAGES = 30
 
 
@@ -520,66 +549,6 @@ def _num(v, lo, hi):
     return float(v)
 
 
-def sign_pdf(src: Path, sig_bytes: bytes, placements_json: str, out: Path) -> None:
-    try:
-        items = json.loads(placements_json)
-    except ValueError:
-        raise ValueError("Invalid placement data")
-    if not isinstance(items, list) or not items:
-        raise ValueError("Place your signature on a page first")
-    if len(items) > MAX_SIGNATURES:
-        raise ValueError(f"Too many signatures (max {MAX_SIGNATURES})")
-
-    try:
-        sig = Image.open(io.BytesIO(sig_bytes))
-        if sig.width * sig.height > 4_000_000:
-            raise ValueError("Signature image is too large")
-        sig.load()
-    except ValueError:
-        raise
-    except Exception:
-        raise ValueError("The signature image is not valid")
-    sig = sig.convert("RGBA")
-    box = sig.getchannel("A").getbbox()
-    if not box:
-        raise ValueError("The signature is empty")
-    sig = sig.crop(box)
-
-    doc = _open_checked(src)
-    try:
-        cache = {}
-        for it in items:
-            if not isinstance(it, dict):
-                raise ValueError("Invalid placement data")
-            pno = it.get("page")
-            if isinstance(pno, bool) or not isinstance(pno, int) or not 1 <= pno <= doc.page_count:
-                raise ValueError(f"Pages must be between 1 and {doc.page_count}")
-            xf, yf = _num(it.get("x"), 0, 1), _num(it.get("y"), 0, 1)
-            wf = _num(it.get("w"), 0.02, 1)
-
-            page = doc[pno - 1]
-            W, H = page.rect.width, page.rect.height
-            w = wf * W
-            h = w * sig.height / sig.width
-            if h > H:
-                h, w = H, H * sig.width / sig.height
-            x0 = min(max(xf * W, 0), W - w)
-            y0 = min(max(yf * H, 0), H - h)
-            rect = pymupdf.Rect(x0, y0, x0 + w, y0 + h) * page.derotation_matrix
-            rect.normalize()
-
-            rot = page.rotation
-            if rot not in cache:  # turn the image so it looks upright on rotated pages
-                img = sig.rotate(rot, expand=True) if rot else sig
-                buf = io.BytesIO()
-                img.save(buf, "PNG")
-                cache[rot] = buf.getvalue()
-            page.insert_image(rect, stream=cache[rot])
-        doc.save(out, garbage=3, deflate=True)
-    finally:
-        doc.close()
-
-
 def _render(page, width):
     zoom = width / max(page.rect.width, 1)
     pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
@@ -604,6 +573,82 @@ def _b64(img) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+# ---------------------------------------------------------------
+# Sign PDF
+# ---------------------------------------------------------------
+def _prepare_signature(data: bytes):
+    try:
+        img = Image.open(io.BytesIO(data))
+        if img.width * img.height > 4_000_000:
+            raise ValueError("Signature image is too large")
+        img.load()
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("The signature image is not valid")
+    img = img.convert("RGBA")
+    box = img.getchannel("A").getbbox()
+    if not box:
+        raise ValueError("A signature is empty")
+    return img.crop(box)
+
+
+def sign_pdf(src: Path, images: list[bytes], placements_json: str, out: Path) -> None:
+    try:
+        items = json.loads(placements_json)
+    except ValueError:
+        raise ValueError("Invalid placement data")
+    if not isinstance(items, list) or not items:
+        raise ValueError("Place something on a page first")
+    if len(items) > MAX_SIGNATURES:
+        raise ValueError(f"Too many items (max {MAX_SIGNATURES})")
+    if not 1 <= len(images) <= MAX_SIGN_IMAGES:
+        raise ValueError(f"Use between 1 and {MAX_SIGN_IMAGES} different items")
+
+    sigs = [_prepare_signature(b) for b in images]
+
+    doc = _open_checked(src)
+    try:
+        cache = {}
+        for it in items:
+            if not isinstance(it, dict):
+                raise ValueError("Invalid placement data")
+            pno, idx = it.get("page"), it.get("img")
+            if isinstance(pno, bool) or not isinstance(pno, int) or not 1 <= pno <= doc.page_count:
+                raise ValueError(f"Pages must be between 1 and {doc.page_count}")
+            if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < len(sigs):
+                raise ValueError("Invalid placement data")
+            xf, yf = _num(it.get("x"), 0, 1), _num(it.get("y"), 0, 1)
+            wf = _num(it.get("w"), 0.02, 1)
+
+            sig = sigs[idx]
+            page = doc[pno - 1]
+            W, H = page.rect.width, page.rect.height
+            w = wf * W
+            h = w * sig.height / sig.width
+            if h > H:
+                h, w = H, H * sig.width / sig.height
+            x0 = min(max(xf * W, 0), W - w)
+            y0 = min(max(yf * H, 0), H - h)
+            rect = pymupdf.Rect(x0, y0, x0 + w, y0 + h) * page.derotation_matrix
+            rect.normalize()
+
+            rot = page.rotation
+            key = (idx, rot)
+            if key not in cache:  # turn the image so it looks upright on rotated pages
+                img = sig.rotate(rot, expand=True) if rot else sig
+                buf = io.BytesIO()
+                img.save(buf, "PNG")
+                cache[key] = buf.getvalue()
+            page.insert_image(rect, stream=cache[key])
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+
+# ---------------------------------------------------------------
+# Compare PDF
+# ---------------------------------------------------------------
 def compare_pdfs(path_a: Path, path_b: Path, width: int = 500) -> dict:
     doc_a, doc_b = _open_checked(path_a), None
     try:
@@ -623,7 +668,9 @@ def compare_pdfs(path_a: Path, path_b: Path, width: int = 500) -> dict:
                 img_a, mat_a = _render(pa, width)
                 img_b, mat_b = _render(pb, width)
                 wa, wb = _words(pa), _words(pb)
-                sm = difflib.SequenceMatcher(None, [t for _, t in wa], [t for _, t in wb], autojunk=False)
+                sm = difflib.SequenceMatcher(
+                    None, [t for _, t in wa], [t for _, t in wb], autojunk=False
+                )
                 rem, add = [], []
                 for tag, i1, i2, j1, j2 in sm.get_opcodes():
                     if tag in ("replace", "delete"):
@@ -657,4 +704,3 @@ def compare_pdfs(path_a: Path, path_b: Path, width: int = 500) -> dict:
         doc_a.close()
         if doc_b:
             doc_b.close()
-

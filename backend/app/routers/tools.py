@@ -289,24 +289,28 @@ def pdf_pages(background: BackgroundTasks, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(500, f"Preview failed: {e}")
 
-
 @router.post("/sign-pdf")
 def sign_pdf(
     background: BackgroundTasks,
     file: UploadFile = File(...),
-    signature: UploadFile = File(...),
+    signatures: list[UploadFile] = File(...),
     placements: str = Form(...),
 ):
     require_ext([file], (".pdf",))
-    require_ext([signature], (".png",))
-    sig_bytes = signature.file.read(2 * 1024 * 1024 + 1)
-    if len(sig_bytes) > 2 * 1024 * 1024:
-        raise HTTPException(413, "Signature image is too large (max 2 MB)")
+    require_ext(signatures, (".png",))
+    if len(signatures) > 10:
+        raise HTTPException(400, "Too many different items (max 10)")
+    images = []
+    for s in signatures:
+        data = s.file.read(2 * 1024 * 1024 + 1)
+        if len(data) > 2 * 1024 * 1024:
+            raise HTTPException(413, "An item image is too large (max 2 MB)")
+        images.append(data)
     job_dir, src = fs.save_upload(file, ".pdf")
     background.add_task(fs.cleanup, job_dir)
     out = job_dir / "signed.pdf"
     try:
-        pdf_ops.sign_pdf(src, sig_bytes, placements, out)
+        pdf_ops.sign_pdf(src, images, placements, out)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
