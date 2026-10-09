@@ -1,3 +1,4 @@
+import math
 import base64
 import difflib
 import io
@@ -8,12 +9,13 @@ from pathlib import Path
 
 import pymupdf
 from openpyxl import Workbook
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.util import Emu, Pt
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import RectangleObject
 
 
 # ---------------------------------------------------------------
@@ -55,11 +57,6 @@ def extract_pages(stream, spec: str, out: Path) -> None:
         writer.write(fh)
 
 
-def images_to_pdf(streams: list, out: Path) -> None:
-    images = [Image.open(s).convert("RGB") for s in streams]
-    images[0].save(out, save_all=True, append_images=images[1:])
-
-
 def rotate_pdf(stream, angle: int, spec: str, out: Path) -> None:
     reader = PdfReader(stream)
     writer = PdfWriter()
@@ -99,12 +96,99 @@ def unlock_pdf(stream, password: str, out: Path) -> None:
 
 
 # ---------------------------------------------------------------
-# PDF -> JPG
+# Images -> PDF (JPG, PNG, WebP)
+# ---------------------------------------------------------------
+MAX_IMAGES = 50
+PAGE_SIZES = {"a4": (595.0, 842.0), "letter": (612.0, 792.0)}
+MARGINS = {"none": 0, "small": 20, "big": 50}
+
+
+def _load_image(stream):
+    try:
+        img = Image.open(stream)
+        if img.width * img.height > 50_000_000:
+            raise ValueError("An image is too large")
+        fmt = img.format
+        img.load()
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("One of the files is not a valid image")
+    img = ImageOps.exif_transpose(img)  # fix sideways phone photos
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGB", img.size, "white")
+        bg.paste(img, mask=img.getchannel("A"))
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    if fmt == "PNG":
+        img.save(buf, "PNG")
+    else:
+        img.save(buf, "JPEG", quality=95)
+    return img.width, img.height, buf.getvalue()
+
+
+def _add_image_page(doc, w, h, data, size, orientation, margin):
+    if size == "fit":
+        iw, ih = w * 0.75, h * 0.75  # pixels -> points at 96 dpi
+        k = min(1, 14000 / max(iw, ih))  # PDF page size limit
+        iw, ih = iw * k, ih * k
+        pw, ph = iw + 2 * margin, ih + 2 * margin
+        x, y = margin, margin
+    else:
+        pw, ph = PAGE_SIZES[size]
+        landscape = (w > h) if orientation == "auto" else orientation == "landscape"
+        if landscape:
+            pw, ph = ph, pw
+        s = min((pw - 2 * margin) / w, (ph - 2 * margin) / h)
+        iw, ih = w * s, h * s
+        x, y = (pw - iw) / 2, (ph - ih) / 2
+    page = doc.new_page(width=pw, height=ph)
+    page.insert_image(pymupdf.Rect(x, y, x + iw, y + ih), stream=data)
+
+
+def images_to_pdf(streams: list, out: Path, size="a4", orientation="auto",
+                  margin="small", separate=False) -> None:
+    if not 1 <= len(streams) <= MAX_IMAGES:
+        raise ValueError(f"Use between 1 and {MAX_IMAGES} images")
+    if size not in (*PAGE_SIZES, "fit"):
+        raise ValueError("Unknown page size")
+    if orientation not in ("auto", "portrait", "landscape"):
+        raise ValueError("Unknown orientation")
+    if margin not in MARGINS:
+        raise ValueError("Unknown margin")
+    m = MARGINS[margin]
+    items = [_load_image(s) for s in streams]
+
+    if separate:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
+            for k, (w, h, data) in enumerate(items, start=1):
+                doc = pymupdf.open()
+                _add_image_page(doc, w, h, data, size, orientation, m)
+                z.writestr(f"image_{k}.pdf", doc.tobytes(deflate=True))
+                doc.close()
+        return
+
+    doc = pymupdf.open()
+    try:
+        for w, h, data in items:
+            _add_image_page(doc, w, h, data, size, orientation, m)
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+
+# ---------------------------------------------------------------
+# PDF -> JPG / PNG
 # ---------------------------------------------------------------
 MAX_IMAGE_PAGES = 50
 
 
-def pdf_to_images(src: Path, dpi: int, job_dir: Path) -> Path:
+def pdf_to_images(src: Path, dpi: int, job_dir: Path, fmt: str = "jpg") -> Path:
+    if fmt not in ("jpg", "png"):
+        raise ValueError("Unknown image format")
     doc = pymupdf.open(src)
     try:
         if doc.needs_pass:
@@ -112,20 +196,21 @@ def pdf_to_images(src: Path, dpi: int, job_dir: Path) -> Path:
         total = doc.page_count
         if total > MAX_IMAGE_PAGES:
             raise ValueError(f"Too many pages (max {MAX_IMAGE_PAGES}). Extract fewer pages first")
-        zoom = dpi / 72
-        matrix = pymupdf.Matrix(zoom, zoom)
+        matrix = pymupdf.Matrix(dpi / 72, dpi / 72)
+
+        def render(page):
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            return pix.tobytes("png") if fmt == "png" else pix.tobytes("jpg", jpg_quality=90)
 
         if total == 1:
-            out = job_dir / "page_1.jpg"
-            pix = doc[0].get_pixmap(matrix=matrix, alpha=False)
-            out.write_bytes(pix.tobytes("jpg", jpg_quality=90))
+            out = job_dir / f"page_1.{fmt}"
+            out.write_bytes(render(doc[0]))
             return out
 
         out = job_dir / "pages.zip"
         with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
             for i, page in enumerate(doc, start=1):
-                pix = page.get_pixmap(matrix=matrix, alpha=False)
-                z.writestr(f"page_{i}.jpg", pix.tobytes("jpg", jpg_quality=90))
+                z.writestr(f"page_{i}.{fmt}", render(page))
         return out
     finally:
         doc.close()
@@ -505,7 +590,7 @@ def organize_pdf(streams: list, plan_json: str, out: Path) -> None:
 
 
 # ---------------------------------------------------------------
-# Sign PDF and Compare PDF (shared helpers first)
+# Shared helpers for Sign, Compare and Redact
 # ---------------------------------------------------------------
 MAX_SIGN_PAGES = 30
 MAX_SIGNATURES = 50
@@ -545,7 +630,7 @@ def pdf_pages(src: Path, width: int = 700) -> list[dict]:
 
 def _num(v, lo, hi):
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
-        raise ValueError("Invalid signature position")
+        raise ValueError("Invalid position")
     return float(v)
 
 
@@ -705,6 +790,7 @@ def compare_pdfs(path_a: Path, path_b: Path, width: int = 500) -> dict:
         if doc_b:
             doc_b.close()
 
+
 # ---------------------------------------------------------------
 # Redact PDF
 # ---------------------------------------------------------------
@@ -796,4 +882,395 @@ def redact_pdf(src: Path, terms_text: str, pattern_keys: str, boxes_json: str, o
         doc.save(out, garbage=4, deflate=True, clean=True)
         return total
     finally:
-        doc.close()            
+        doc.close()
+
+
+# ---------------------------------------------------------------
+# Crop PDF
+# ---------------------------------------------------------------
+def crop_pdf(stream, box_json: str, spec: str, out: Path) -> None:
+    try:
+        box = json.loads(box_json)
+    except ValueError:
+        raise ValueError("Invalid crop area")
+    if not isinstance(box, dict):
+        raise ValueError("Invalid crop area")
+    u0, v0 = _num(box.get("x"), 0, 1), _num(box.get("y"), 0, 1)
+    u1 = min(u0 + _num(box.get("w"), 0.01, 1), 1)
+    v1 = min(v0 + _num(box.get("h"), 0.01, 1), 1)
+
+    reader = PdfReader(stream)
+    if reader.is_encrypted:
+        raise ValueError("This PDF is password protected. Unlock it first")
+    total = len(reader.pages)
+    targets = set(_safe_pages(spec, total)) if spec.strip() else set(range(total))
+
+    writer = PdfWriter()
+    for i, src_page in enumerate(reader.pages):
+        page = writer.add_page(src_page)
+        if i not in targets:
+            continue
+        cb = page.cropbox  # the visible area (falls back to the media box)
+        left, bottom, right, top = float(cb.left), float(cb.bottom), float(cb.right), float(cb.top)
+        bw, bh = right - left, top - bottom
+        rot = page.rotation % 360
+
+        def to_pdf(u, v):  # displayed fractions -> PDF coordinates (y up)
+            if rot == 90:
+                return left + v * bw, bottom + u * bh
+            if rot == 180:
+                return left + (1 - u) * bw, bottom + v * bh
+            if rot == 270:
+                return left + (1 - v) * bw, top - u * bh
+            return left + u * bw, top - v * bh
+
+        (xa, ya), (xb, yb) = to_pdf(u0, v0), to_pdf(u1, v1)
+        page.cropbox = RectangleObject([min(xa, xb), min(ya, yb), max(xa, xb), max(ya, yb)])
+
+    with out.open("wb") as fh:
+        writer.write(fh)
+
+
+# ---------------------------------------------------------------
+# Edit PDF
+# ---------------------------------------------------------------
+MAX_EDIT_PAGES = 20
+MAX_EDIT_OPS = 300
+MAX_EDIT_LINES = 3000
+EDIT_TYPES = {"text", "replace", "whiteout", "highlight", "rect", "ellipse", "line", "draw"}
+_FONT_SETS = (
+    ("helv", "hebo", "heit", "hebi"),  # sans
+    ("tiro", "tibo", "tiit", "tibi"),  # serif
+    ("cour", "cobo", "coit", "cobi"),  # mono
+)
+EDIT_FONTS = {f for fs in _FONT_SETS for f in fs}
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _rgb01(c):
+    if not isinstance(c, str) or not _HEX.match(c):
+        raise ValueError("Invalid colour")
+    return tuple(int(c[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+
+def _font_for(name: str, flags: int) -> str:
+    low = name.lower()
+    bold = bool(flags & 16) or "bold" in low
+    italic = bool(flags & 2) or "italic" in low or "oblique" in low
+    if (flags & 8) or "mono" in low or "courier" in low:
+        fam = _FONT_SETS[2]
+    elif (flags & 4) or "times" in low or ("serif" in low and "sans" not in low):
+        fam = _FONT_SETS[1]
+    else:
+        fam = _FONT_SETS[0]
+    return fam[(1 if bold else 0) + (2 if italic else 0)]
+
+
+def pdf_edit_info(src: Path, width: int = 700) -> list[dict]:
+    doc = _open_checked(src)
+    try:
+        if doc.page_count > MAX_EDIT_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_EDIT_PAGES}). Extract fewer pages first")
+        pages, total = [], 0
+        for page in doc:
+            W, H = max(page.rect.width, 1), max(page.rect.height, 1)
+            zoom = width / W
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            lines = []
+            for b in page.get_text("dict")["blocks"]:
+                if b["type"] != 0:
+                    continue
+                for ln in b["lines"]:
+                    spans = [s for s in ln["spans"] if s["text"].strip()]
+                    if not spans or total >= MAX_EDIT_LINES:
+                        continue
+                    if page.rotation == 0 and abs(ln["dir"][1]) > 0.1:
+                        continue  # skip text that is not horizontal
+                    s0 = spans[0]
+                    r = pymupdf.Rect(ln["bbox"]) * page.rotation_matrix
+                    r.normalize()
+                    o = pymupdf.Point(s0["origin"]) * page.rotation_matrix
+                    lines.append({
+                        "x": round(r.x0 / W, 5), "y": round(r.y0 / H, 5),
+                        "w": round(r.width / W, 5), "h": round(r.height / H, 5),
+                        "ox": round(o.x / W, 5), "oy": round(o.y / H, 5),
+                        "text": "".join(s["text"] for s in ln["spans"]).strip(),
+                        "size": round(s0["size"], 1),
+                        "color": "#%06x" % s0["color"],
+                        "font": _font_for(s0["font"], s0["flags"]),
+                    })
+                    total += 1
+            pages.append({
+                "img": base64.b64encode(pix.tobytes("jpg", jpg_quality=75)).decode(),
+                "w": round(W, 1), "h": round(H, 1), "lines": lines,
+            })
+        return pages
+    finally:
+        doc.close()
+
+
+def _op_rect(page, op, shrink=0.0):
+    W, H = page.rect.width, page.rect.height
+    x, y = _num(op.get("x"), 0, 1), _num(op.get("y"), 0, 1)
+    w, h = _num(op.get("w"), 0.001, 1), _num(op.get("h"), 0.001, 1)
+    y0, y1 = (y + h * shrink) * H, (min(y + h, 1) - h * shrink) * H
+    r = pymupdf.Rect(x * W, y0, min(x + w, 1) * W, y1) * page.derotation_matrix
+    r.normalize()
+    return r
+
+
+def _op_point(page, fx, fy):
+    return pymupdf.Point(
+        _num(fx, 0, 1) * page.rect.width, _num(fy, 0, 1) * page.rect.height
+    ) * page.derotation_matrix
+
+
+def edit_pdf(src: Path, ops_json: str, out: Path) -> None:
+    try:
+        ops = json.loads(ops_json)
+    except ValueError:
+        raise ValueError("Invalid edit data")
+    if not isinstance(ops, list) or not ops:
+        raise ValueError("Make a change first")
+    if len(ops) > MAX_EDIT_OPS:
+        raise ValueError(f"Too many changes (max {MAX_EDIT_OPS})")
+
+    latin = pymupdf.Font("helv")
+
+    def check_text(t):
+        if not isinstance(t, str) or len(t) > 5000:
+            raise ValueError("Invalid text")
+        for ch in t:
+            if ch not in "\n\r\t " and not latin.has_glyph(ord(ch)):
+                raise ValueError(
+                    f"The character '{ch}' is not supported yet. "
+                    "Use Latin letters, numbers and common symbols"
+                )
+
+    doc = _open_checked(src)
+    try:
+        if doc.page_count > MAX_EDIT_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_EDIT_PAGES})")
+        by_page = {}
+        for op in ops:
+            if not isinstance(op, dict) or op.get("type") not in EDIT_TYPES:
+                raise ValueError("Invalid edit data")
+            pno = op.get("page")
+            if isinstance(pno, bool) or not isinstance(pno, int) or not 1 <= pno <= doc.page_count:
+                raise ValueError(f"Pages must be between 1 and {doc.page_count}")
+            by_page.setdefault(pno, []).append(op)
+
+        for pno, plist in by_page.items():
+            page = doc[pno - 1]
+            rot = page.rotation
+
+            # 1. Remove what is under whiteouts and replaced lines
+            covers = [o for o in plist if o["type"] in ("whiteout", "replace")]
+            for o in covers:
+                page.add_redact_annot(
+                    _op_rect(page, o, shrink=0.1 if o["type"] == "replace" else 0.0),
+                    fill=(1, 1, 1),
+                )
+            if covers:
+                page.apply_redactions(images=2)
+
+            # 2. Shapes
+            shape, drew = page.new_shape(), False
+            for o in plist:
+                t = o["type"]
+                if t == "highlight":
+                    shape.draw_rect(_op_rect(page, o))
+                    shape.finish(color=None, fill=_rgb01(o.get("color", "#ffe600")), fill_opacity=0.35)
+                    drew = True
+                elif t in ("rect", "ellipse"):
+                    col, sw = _rgb01(o.get("color", "#000000")), _num(o.get("sw", 1), 0.25, 20)
+                    r = _op_rect(page, o)
+                    shape.draw_rect(r) if t == "rect" else shape.draw_oval(r)
+                    shape.finish(color=col, fill=col if o.get("fill") is True else None, width=sw)
+                    drew = True
+                elif t == "line":
+                    col, sw = _rgb01(o.get("color", "#000000")), _num(o.get("sw", 1), 0.25, 20)
+                    shape.draw_line(_op_point(page, o.get("x1"), o.get("y1")),
+                                    _op_point(page, o.get("x2"), o.get("y2")))
+                    shape.finish(color=col, width=sw, closePath=False)
+                    drew = True
+                elif t == "draw":
+                    col, sw = _rgb01(o.get("color", "#000000")), _num(o.get("sw", 1), 0.25, 20)
+                    pts = o.get("pts")
+                    if not isinstance(pts, list) or not 2 <= len(pts) <= 2000:
+                        raise ValueError("Invalid drawing")
+                    points = []
+                    for p in pts:
+                        if not isinstance(p, list) or len(p) != 2:
+                            raise ValueError("Invalid drawing")
+                        points.append(_op_point(page, p[0], p[1]))
+                    shape.draw_polyline(points)
+                    shape.finish(color=col, width=sw, closePath=False, lineCap=1, lineJoin=1)
+                    drew = True
+            if drew:
+                shape.commit()
+
+            # 3. Text on top
+            for o in plist:
+                if o["type"] not in ("text", "replace"):
+                    continue
+                txt = o.get("text", "")
+                check_text(txt)
+                if not txt.strip():
+                    continue  # an empty replacement just removes the line
+                font = o.get("font", "helv")
+                if font not in EDIT_FONTS:
+                    raise ValueError("Unknown font")
+                size = _num(o.get("size", 12), 4, 200)
+                col = _rgb01(o.get("color", "#000000"))
+                if o["type"] == "text":
+                    rc = page.insert_textbox(_op_rect(page, o), txt, fontsize=size,
+                                             fontname=font, color=col, rotate=rot)
+                    if rc < 0:
+                        raise ValueError(
+                            f"Text does not fit its box on page {pno}. "
+                            "Make the box bigger or the text smaller"
+                        )
+                else:
+                    page.insert_text(_op_point(page, o.get("ox"), o.get("oy")),
+                                     txt.replace("\n", " "), fontsize=size,
+                                     fontname=font, color=col, rotate=rot)
+
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+
+# ---------------------------------------------------------------
+# Page numbers and watermark
+# ---------------------------------------------------------------
+MAX_STAMP_PAGES = 300
+NUM_FORMATS = {
+    "n": "{n}",
+    "page_n": "Page {n}",
+    "n_of_t": "{n} / {t}",
+    "page_n_of_t": "Page {n} of {t}",
+}
+NUM_POSITIONS = {"bl", "bc", "br", "tl", "tc", "tr"}
+ANGLE_SIGN = 1  # change to -1 if the diagonal watermark leans the wrong way
+
+
+def _check_latin(text: str) -> None:
+    latin = pymupdf.Font("helv")
+    for ch in text:
+        if not latin.has_glyph(ord(ch)):
+            raise ValueError(
+                f"The character '{ch}' is not supported yet. "
+                "Use Latin letters, numbers and common symbols"
+            )
+
+
+def _int_in(value, lo, hi, name):
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a whole number")
+    if not lo <= v <= hi:
+        raise ValueError(f"{name} must be between {lo} and {hi}")
+    return v
+
+
+def _target_pages(doc, spec: str) -> list[int]:
+    total = doc.page_count
+    if total > MAX_STAMP_PAGES:
+        raise ValueError(f"Too many pages (max {MAX_STAMP_PAGES}). Split the PDF first")
+    if spec.strip():
+        return sorted(set(_safe_pages(spec, total)))
+    return list(range(total))
+
+
+def add_page_numbers(src: Path, position: str, fmt: str, start: str, size: str,
+                     margin: str, color: str, spec: str, out: Path) -> None:
+    if position not in NUM_POSITIONS:
+        raise ValueError("Unknown position")
+    if fmt not in NUM_FORMATS:
+        raise ValueError("Unknown number format")
+    first = _int_in(start, 0, 100000, "Start number")
+    fs = _int_in(size, 6, 36, "Size")
+    mg = _int_in(margin, 0, 150, "Margin")
+    col = _rgb01(color)
+
+    doc = _open_checked(src)
+    try:
+        targets = _target_pages(doc, spec)
+        last = first + len(targets) - 1  # the "total" in "1 of N"
+        for k, i in enumerate(targets):
+            page = doc[i]
+            text = NUM_FORMATS[fmt].format(n=first + k, t=last)
+            W, H = page.rect.width, page.rect.height  # size as displayed
+            tw = pymupdf.get_text_length(text, fontname="helv", fontsize=fs)
+            if position[1] == "l":
+                x = mg
+            elif position[1] == "c":
+                x = (W - tw) / 2
+            else:
+                x = W - mg - tw
+            y = mg + fs if position[0] == "t" else H - mg
+            pt = pymupdf.Point(x, y) * page.derotation_matrix
+            page.insert_text(pt, text, fontsize=fs, fontname="helv",
+                             color=col, rotate=page.rotation)
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+
+def add_watermark(src: Path, text: str, size: str, color: str, opacity: str,
+                  angle: str, layout: str, position: str, spec: str, out: Path) -> None:
+    text = " ".join(text.split())
+    if not text:
+        raise ValueError("Enter the watermark text")
+    if len(text) > 60:
+        raise ValueError("The watermark text is too long (max 60 characters)")
+    _check_latin(text)
+    fs0 = _int_in(size, 10, 200, "Size")
+    pct = _int_in(opacity, 5, 100, "Opacity")
+    deg = _int_in(angle, -90, 90, "Angle")
+    if layout not in ("center", "tile"):
+        raise ValueError("Unknown layout")
+    if position not in ("over", "behind"):
+        raise ValueError("Unknown position")
+    col = _rgb01(color)
+
+    doc = _open_checked(src)
+    try:
+        targets = _target_pages(doc, spec)
+        for i in targets:
+            page = doc[i]
+            W, H = page.rect.width, page.rect.height
+            fs = fs0
+            tw = pymupdf.get_text_length(text, fontname="hebo", fontsize=fs)
+
+            if layout == "center":
+                maxw = 0.85 * W if deg == 0 else 0.7 * math.hypot(W, H)
+                if tw > maxw:  # shrink so the text stays on the page
+                    fs, tw = fs * maxw / tw, maxw
+                centers = [(W / 2, H / 2)]
+            else:
+                stepx = max(tw * (1.1 if deg else 0.4) + fs * 2, W / 6)
+                stepy = max(tw * 0.7 if deg else fs * 5, H / 10)
+                centers, row, cy = [], 0, stepy / 2
+                while cy < H + stepy:
+                    cx = stepx / 2 + (stepx / 2 if row % 2 else 0) - stepx
+                    while cx < W + stepx:
+                        centers.append((cx, cy))
+                        cx += stepx
+                    cy += stepy
+                    row += 1
+
+            for cx, cy in centers:
+                start = pymupdf.Point(cx - tw / 2, cy + fs * 0.35) * page.derotation_matrix
+                pivot = pymupdf.Point(cx, cy) * page.derotation_matrix
+                kw = dict(fontsize=fs, fontname="hebo", color=col,
+                          fill_opacity=pct / 100, stroke_opacity=pct / 100,
+                          rotate=page.rotation, overlay=(position == "over"))
+                if deg:
+                    kw["morph"] = (pivot, pymupdf.Matrix(ANGLE_SIGN * deg))
+                page.insert_text(start, text, **kw)
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()

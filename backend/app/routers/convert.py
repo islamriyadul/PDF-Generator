@@ -13,6 +13,7 @@ from app.services.office import office_to_pdf
 router = APIRouter(prefix="/convert", tags=["convert"])
 
 
+# ---------------- PDF -> Word ----------------
 @router.post("/pdf-to-word")
 def pdf_to_word(background: BackgroundTasks, file: UploadFile = File(...)):
     job_dir, src = fs.save_upload(file, ".pdf")
@@ -27,6 +28,7 @@ def pdf_to_word(background: BackgroundTasks, file: UploadFile = File(...)):
     return FileResponse(out, filename=Path(file.filename).stem + ".docx")
 
 
+# ---------------- Office -> PDF ----------------
 def _office_endpoint(background, file, exts):
     job_dir, src = fs.save_upload(file, exts)
     background.add_task(fs.cleanup, job_dir)
@@ -52,6 +54,7 @@ def excel_to_pdf(background: BackgroundTasks, file: UploadFile = File(...)):
     return _office_endpoint(background, file, (".xlsx", ".xls"))
 
 
+# ---------------- HTML -> PDF ----------------
 @router.post("/html-to-pdf")
 def html_to_pdf_endpoint(background: BackgroundTasks, file: UploadFile = File(...)):
     if Path(file.filename).suffix.lower() not in (".html", ".htm"):
@@ -68,25 +71,34 @@ def html_to_pdf_endpoint(background: BackgroundTasks, file: UploadFile = File(..
         raise HTTPException(500, f"Conversion failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + ".pdf")
 
-@router.post("/pdf-to-jpg")
-def pdf_to_jpg(
-    background: BackgroundTasks,
-    file: UploadFile = File(...),
-    dpi: int = Form(150),
-):
+
+# ---------------- PDF -> JPG / PNG ----------------
+def _pdf_to_images_endpoint(background, file, dpi, fmt):
     if dpi not in (72, 150, 200):
         raise HTTPException(400, "Quality must be 72, 150 or 200 DPI")
     job_dir, src = fs.save_upload(file, ".pdf")
     background.add_task(fs.cleanup, job_dir)
     try:
-        out = pdf_ops.pdf_to_images(src, dpi, job_dir)
+        out = pdf_ops.pdf_to_images(src, dpi, job_dir, fmt)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"Conversion failed: {e}")
-    name = Path(file.filename).stem + (".zip" if out.suffix == ".zip" else ".jpg")
+    name = Path(file.filename).stem + (".zip" if out.suffix == ".zip" else f".{fmt}")
     return FileResponse(out, filename=name)
 
+
+@router.post("/pdf-to-jpg")
+def pdf_to_jpg(background: BackgroundTasks, file: UploadFile = File(...), dpi: int = Form(150)):
+    return _pdf_to_images_endpoint(background, file, dpi, "jpg")
+
+
+@router.post("/pdf-to-png")
+def pdf_to_png(background: BackgroundTasks, file: UploadFile = File(...), dpi: int = Form(150)):
+    return _pdf_to_images_endpoint(background, file, dpi, "png")
+
+
+# ---------------- PDF -> Excel / PowerPoint ----------------
 @router.post("/pdf-to-excel")
 def pdf_to_excel(background: BackgroundTasks, file: UploadFile = File(...)):
     job_dir, src = fs.save_upload(file, ".pdf")
@@ -119,3 +131,45 @@ def pdf_to_powerpoint(
     except Exception as e:
         raise HTTPException(500, f"Conversion failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + ".pptx")
+
+def _images_endpoint(background, files, exts, size, orientation, margin, separate):
+    for f in files:
+        if not f.filename.lower().endswith(exts):
+            raise HTTPException(400, f"{f.filename}: please upload {' or '.join(exts)} files")
+        if f.size and f.size > MAX_SIZE:
+            raise HTTPException(413, f"{f.filename} is too large (max 20 MB)")
+    sep = separate == "true"
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / ("images.zip" if sep else "images.pdf")
+    try:
+        pdf_ops.images_to_pdf([f.file for f in files], out, size, orientation, margin, sep)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Conversion failed: {e}")
+    return FileResponse(out, filename="images.zip" if sep else "images.pdf")
+
+
+@router.post("/jpg-to-pdf")
+def jpg_to_pdf(
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    size: str = Form("a4"),
+    orientation: str = Form("auto"),
+    margin: str = Form("small"),
+    separate: str = Form("false"),
+):
+    return _images_endpoint(background, files, (".jpg", ".jpeg"), size, orientation, margin, separate)
+
+
+@router.post("/png-to-pdf")
+def png_to_pdf(
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    size: str = Form("a4"),
+    orientation: str = Form("auto"),
+    margin: str = Form("small"),
+    separate: str = Form("false"),
+):
+    return _images_endpoint(background, files, (".png",), size, orientation, margin, separate)

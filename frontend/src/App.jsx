@@ -4,10 +4,38 @@ import Organizer from "./Organizer";
 import SignPdf from "./SignPdf";
 import Comparer from "./Comparer";
 import Redactor from "./Redactor";
+import Cropper from "./Cropper";
+import EditPdf from "./EditPdf";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 const CATEGORIES = ["All", "Convert", "Organize", "Optimize", "Security", "Edit"];
+
+const IMAGE_PDF_FIELDS = [
+  { name: "size", label: "Page size", type: "select", default: "a4", options: [
+    { value: "a4", label: "A4" },
+    { value: "letter", label: "US Letter" },
+    { value: "fit", label: "Same size as the image" },
+  ] },
+  { name: "orientation", label: "Orientation", type: "select", default: "auto", options: [
+    { value: "auto", label: "Automatic" },
+    { value: "portrait", label: "Portrait" },
+    { value: "landscape", label: "Landscape" },
+  ] },
+  { name: "margin", label: "Margin", type: "select", default: "small", options: [
+    { value: "none", label: "None" },
+    { value: "small", label: "Small" },
+    { value: "big", label: "Big" },
+  ] },
+  { name: "separate", label: "Output", type: "select", default: "false", options: [
+    { value: "false", label: "One PDF with all images" },
+    { value: "true", label: "One PDF per image (ZIP)" },
+  ] },
+];
+
+const DPI_FIELD = [
+  { name: "dpi", label: "Quality", type: "select", default: "150", unit: " DPI", options: ["72", "150", "200"] },
+];
 
 const TOOLS = [
   // ---- Convert ----
@@ -15,7 +43,10 @@ const TOOLS = [
   { id: "powerpoint-to-pdf", cat: "Convert", label: "PowerPoint → PDF", desc: "Turn slides into PDF", endpoint: "/convert/powerpoint-to-pdf", accept: ".pptx,.ppt", out: ".pdf" },
   { id: "excel-to-pdf", cat: "Convert", label: "Excel → PDF", desc: "Turn spreadsheets into PDF", endpoint: "/convert/excel-to-pdf", accept: ".xlsx,.xls", out: ".pdf" },
   { id: "html-to-pdf", cat: "Convert", label: "HTML → PDF", desc: "Turn an HTML file into PDF", endpoint: "/convert/html-to-pdf", accept: ".html,.htm", out: ".pdf" },
-  { id: "image-to-pdf", cat: "Convert", label: "Image → PDF", desc: "Combine JPG and PNG into one PDF", endpoint: "/tools/image-to-pdf", accept: ".jpg,.jpeg,.png", out: ".pdf", multiple: true, name: "images" },
+  { id: "jpg-to-pdf", cat: "Convert", label: "JPG → PDF", desc: "Turn JPG images into PDF",
+    endpoint: "/convert/jpg-to-pdf", accept: ".jpg,.jpeg", out: ".pdf", multiple: true, name: "images", fields: IMAGE_PDF_FIELDS },
+  { id: "png-to-pdf", cat: "Convert", label: "PNG → PDF", desc: "Turn PNG images into PDF",
+    endpoint: "/convert/png-to-pdf", accept: ".png", out: ".pdf", multiple: true, name: "images", fields: IMAGE_PDF_FIELDS },
   { id: "pdf-to-word", cat: "Convert", label: "PDF → Word", desc: "Edit your PDF in Word", endpoint: "/convert/pdf-to-word", accept: ".pdf", out: ".docx" },
   { id: "pdf-to-excel", cat: "Convert", label: "PDF → Excel", desc: "Pull tables out of a PDF", endpoint: "/convert/pdf-to-excel", accept: ".pdf", out: ".xlsx" },
   {
@@ -26,11 +57,10 @@ const TOOLS = [
       { value: "editable", label: "Editable (text boxes, shapes, tables)" },
     ] }],
   },
-  {
-    id: "pdf-to-jpg", cat: "Convert", label: "PDF → JPG", desc: "Save each page as an image",
-    endpoint: "/convert/pdf-to-jpg", accept: ".pdf", out: ".jpg",
-    fields: [{ name: "dpi", label: "Quality", type: "select", default: "150", unit: " DPI", options: ["72", "150", "200"] }],
-  },
+  { id: "pdf-to-jpg", cat: "Convert", label: "PDF → JPG", desc: "Save each page as a JPG image",
+    endpoint: "/convert/pdf-to-jpg", accept: ".pdf", out: ".jpg", fields: DPI_FIELD },
+  { id: "pdf-to-png", cat: "Convert", label: "PDF → PNG", desc: "Save each page as a sharp PNG image",
+    endpoint: "/convert/pdf-to-png", accept: ".pdf", out: ".png", fields: DPI_FIELD },
   {
     id: "pdf-to-pdfa", cat: "Convert", label: "PDF → PDF/A", desc: "Archive-ready PDF", suffix: "_pdfa",
     endpoint: "/tools/pdf-to-pdfa", accept: ".pdf", out: ".pdf",
@@ -104,11 +134,63 @@ const TOOLS = [
     endpoint: "/tools/unlock-pdf", accept: ".pdf", out: ".pdf",
     fields: [{ name: "password", label: "Current password", type: "password", required: true }],
   },
+  { id: "redact-pdf", cat: "Security", label: "Redact PDF", desc: "Permanently black out sensitive text", custom: "redact" },
 
   // ---- Edit ----
   { id: "sign-pdf", cat: "Edit", label: "Sign PDF", desc: "Draw, type or upload your signature", custom: "sign" },
   { id: "compare-pdf", cat: "Edit", label: "Compare PDF", desc: "See what changed between two files", custom: "compare" },
-  { id: "redact-pdf", cat: "Security", label: "Redact PDF", desc: "Permanently black out sensitive text", custom: "redact" },
+  { id: "crop-pdf", cat: "Edit", label: "Crop PDF", desc: "Trim margins or cut out an area", custom: "crop" },
+  { id: "edit-pdf", cat: "Edit", label: "Edit PDF", desc: "Add text, edit text, shapes and highlights", custom: "edit" },
+  {
+    id: "add-page-numbers", cat: "Edit", label: "Add page numbers", desc: "Number the pages of your PDF", suffix: "_numbered",
+    endpoint: "/tools/add-page-numbers", accept: ".pdf", out: ".pdf",
+    fields: [
+      { name: "position", label: "Position", type: "select", default: "bc", options: [
+        { value: "bc", label: "Bottom centre" },
+        { value: "br", label: "Bottom right" },
+        { value: "bl", label: "Bottom left" },
+        { value: "tc", label: "Top centre" },
+        { value: "tr", label: "Top right" },
+        { value: "tl", label: "Top left" },
+      ] },
+      { name: "fmt", label: "Format", type: "select", default: "n", options: [
+        { value: "n", label: "1, 2, 3" },
+        { value: "page_n", label: "Page 1, Page 2" },
+        { value: "n_of_t", label: "1 / 10, 2 / 10" },
+        { value: "page_n_of_t", label: "Page 1 of 10" },
+      ] },
+      { name: "start", label: "Start number", type: "text", default: "1" },
+      { name: "size", label: "Font size", type: "select", default: "11", unit: " pt", options: ["8", "9", "10", "11", "12", "14", "16", "20"] },
+      { name: "margin", label: "Distance from the edge", type: "select", default: "36", unit: " pt", options: ["20", "36", "54", "72"] },
+      { name: "color", label: "Colour", type: "color", default: "#000000" },
+      { name: "pages", label: "Only these pages (leave empty for all)", type: "text", placeholder: "e.g. 2-10" },
+    ],
+  },
+
+  {
+    id: "add-watermark", cat: "Edit", label: "Add watermark", desc: "Stamp text across your pages", suffix: "_watermarked",
+    endpoint: "/tools/add-watermark", accept: ".pdf", out: ".pdf",
+    fields: [
+      { name: "text", label: "Watermark text", type: "text", placeholder: "e.g. CONFIDENTIAL", required: true },
+      { name: "size", label: "Font size", type: "select", default: "64", unit: " pt", options: ["24", "36", "48", "64", "80", "110"] },
+      { name: "color", label: "Colour", type: "color", default: "#888888" },
+      { name: "opacity", label: "Opacity", type: "select", default: "30", unit: " %", options: ["10", "20", "30", "50", "70", "100"] },
+      { name: "angle", label: "Angle", type: "select", default: "45", options: [
+        { value: "0", label: "Horizontal" },
+        { value: "45", label: "Diagonal (up)" },
+        { value: "-45", label: "Diagonal (down)" },
+      ] },
+      { name: "layout", label: "Layout", type: "select", default: "center", options: [
+        { value: "center", label: "One in the centre" },
+        { value: "tile", label: "Repeated across the page" },
+      ] },
+      { name: "position", label: "Place it", type: "select", default: "over", options: [
+        { value: "over", label: "Over the content" },
+        { value: "behind", label: "Behind the content" },
+      ] },
+      { name: "pages", label: "Only these pages (leave empty for all)", type: "text", placeholder: "e.g. 1-3,5" },
+    ],
+  },
 ];
 
 const initialValues = (tool) =>
@@ -194,7 +276,10 @@ function ToolForm({ tool }) {
       }
       const blob = await res.blob();
       const base = tool.name || files[0].name.replace(/\.[^.]+$/, "") + (tool.suffix || "");
-      const ext = tool.id === "pdf-to-jpg" ? (blob.type.includes("zip") ? ".zip" : ".jpg") : tool.out;
+      const ext =
+        ["pdf-to-jpg", "pdf-to-png"].includes(tool.id) ? (blob.type.includes("zip") ? ".zip" : tool.out)
+        : ["jpg-to-pdf", "png-to-pdf"].includes(tool.id) ? (values.separate === "true" ? ".zip" : ".pdf")
+        : tool.out;
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = base + ext;
@@ -268,8 +353,7 @@ function ToolPage() {
     );
   }
 
-  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer />, redact: <Redactor /> };
-
+  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer />, redact: <Redactor />, crop: <Cropper />, edit: <EditPdf /> };
   return (
     <div style={{ maxWidth: tool.custom ? 1100 : 560, margin: "30px auto", padding: "0 16px" }}>
       <Link to="/">← All tools</Link>

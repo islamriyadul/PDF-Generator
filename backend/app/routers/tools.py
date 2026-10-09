@@ -2,10 +2,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from app.services import pdf_tools
+
+from app.core.config import MAX_SIZE
 from app.services import files as fs
 from app.services import pdf_ops
-from app.core.config import MAX_SIZE
+from app.services import pdf_tools
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -16,6 +17,7 @@ def require_ext(files: list[UploadFile], exts: tuple[str, ...]) -> None:
             raise HTTPException(400, f"{f.filename}: unsupported file type")
 
 
+# ---------------- merge, extract, images ----------------
 @router.post("/merge-pdf")
 def merge_pdf(background: BackgroundTasks, files: list[UploadFile] = File(...)):
     if len(files) < 2:
@@ -51,21 +53,38 @@ def extract_pages(
 
 
 @router.post("/image-to-pdf")
-def image_to_pdf(background: BackgroundTasks, files: list[UploadFile] = File(...)):
-    require_ext(files, (".jpg", ".jpeg", ".png"))
+def image_to_pdf(
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    size: str = Form("a4"),
+    orientation: str = Form("auto"),
+    margin: str = Form("small"),
+    separate: str = Form("false"),
+):
+    require_ext(files, (".jpg", ".jpeg", ".png", ".webp"))
+    for f in files:
+        if f.size and f.size > MAX_SIZE:
+            raise HTTPException(413, f"{f.filename} is too large (max 20 MB)")
+    sep = separate == "true"
     job_dir = fs.new_job()
     background.add_task(fs.cleanup, job_dir)
-    out = job_dir / "images.pdf"
+    out = job_dir / ("images.zip" if sep else "images.pdf")
     try:
-        pdf_ops.images_to_pdf([f.file for f in files], out)
+        pdf_ops.images_to_pdf([f.file for f in files], out, size, orientation, margin, sep)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"Conversion failed: {e}")
-    return FileResponse(out, filename="images.pdf")
+    return FileResponse(out, filename="images.zip" if sep else "images.pdf")
 
+
+# ---------------- OCR languages ----------------
 @router.get("/ocr-languages")
 def ocr_languages():
     return pdf_tools.list_ocr_languages()
 
+
+# ---------------- rotate, protect, unlock ----------------
 @router.post("/rotate-pdf")
 def rotate_pdf(
     background: BackgroundTasks,
@@ -127,6 +146,8 @@ def unlock_pdf(
         raise HTTPException(500, f"Unlock failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + "_unlocked.pdf")
 
+
+# ---------------- compress, repair, OCR, PDF/A ----------------
 @router.post("/compress-pdf")
 def compress_pdf(
     background: BackgroundTasks,
@@ -185,6 +206,7 @@ def ocr_pdf(
         raise HTTPException(500, str(e))
     return FileResponse(out, filename=Path(file.filename).stem + "_ocr.pdf")
 
+
 @router.post("/pdf-to-pdfa")
 def pdf_to_pdfa(
     background: BackgroundTasks,
@@ -205,6 +227,8 @@ def pdf_to_pdfa(
         raise HTTPException(500, str(e))
     return FileResponse(out, filename=Path(file.filename).stem + "_pdfa.pdf")
 
+
+# ---------------- remove pages, split ----------------
 @router.post("/remove-pages")
 def remove_pages(
     background: BackgroundTasks,
@@ -243,6 +267,21 @@ def split_pdf(
         raise HTTPException(500, f"Split failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + "_split.zip")
 
+
+# ---------------- organize ----------------
+@router.post("/pdf-thumbnails")
+def pdf_thumbnails(background: BackgroundTasks, file: UploadFile = File(...)):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    try:
+        return {"pages": pdf_ops.pdf_thumbnails(src)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Preview failed: {e}")
+
+
 @router.post("/organize-pdf")
 def organize_pdf(
     background: BackgroundTasks,
@@ -265,18 +304,8 @@ def organize_pdf(
     name = Path(files[0].filename).stem + "_organized.pdf"
     return FileResponse(out, filename=name)
 
-@router.post("/pdf-thumbnails")
-def pdf_thumbnails(background: BackgroundTasks, file: UploadFile = File(...)):
-    require_ext([file], (".pdf",))
-    job_dir, src = fs.save_upload(file, ".pdf")
-    background.add_task(fs.cleanup, job_dir)
-    try:
-        return {"pages": pdf_ops.pdf_thumbnails(src)}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"Preview failed: {e}")
 
+# ---------------- sign, compare, redact ----------------
 @router.post("/pdf-pages")
 def pdf_pages(background: BackgroundTasks, file: UploadFile = File(...)):
     require_ext([file], (".pdf",))
@@ -288,6 +317,7 @@ def pdf_pages(background: BackgroundTasks, file: UploadFile = File(...)):
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"Preview failed: {e}")
+
 
 @router.post("/sign-pdf")
 def sign_pdf(
@@ -334,4 +364,127 @@ def compare_pdf(
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        raise HTTPException(500, f"Compare failed: {e}")    
+        raise HTTPException(500, f"Compare failed: {e}")
+
+
+@router.post("/redact-pdf")
+def redact_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    terms: str = Form(""),
+    patterns: str = Form(""),
+    boxes: str = Form("[]"),
+):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "redacted.pdf"
+    try:
+        pdf_ops.redact_pdf(src, terms, patterns, boxes, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Redaction failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_redacted.pdf")  
+
+@router.post("/crop-pdf")
+def crop_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    box: str = Form(...),
+    pages: str = Form(""),
+):
+    require_ext([file], (".pdf",))
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "cropped.pdf"
+    try:
+        pdf_ops.crop_pdf(file.file, box, pages, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Crop failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_cropped.pdf")
+
+
+@router.post("/pdf-edit-info")
+def pdf_edit_info(background: BackgroundTasks, file: UploadFile = File(...)):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    try:
+        return {"pages": pdf_ops.pdf_edit_info(src)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Preview failed: {e}")
+
+
+@router.post("/edit-pdf")
+def edit_pdf(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    ops: str = Form(...),
+):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "edited.pdf"
+    try:
+        pdf_ops.edit_pdf(src, ops, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Edit failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_edited.pdf") 
+
+
+@router.post("/add-page-numbers")
+def add_page_numbers(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    position: str = Form("bc"),
+    fmt: str = Form("n"),
+    start: str = Form("1"),
+    size: str = Form("11"),
+    margin: str = Form("36"),
+    color: str = Form("#000000"),
+    pages: str = Form(""),
+):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "numbered.pdf"
+    try:
+        pdf_ops.add_page_numbers(src, position, fmt, start, size, margin, color, pages, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Page numbering failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_numbered.pdf")
+
+
+@router.post("/add-watermark")
+def add_watermark(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    text: str = Form(...),
+    size: str = Form("64"),
+    color: str = Form("#888888"),
+    opacity: str = Form("30"),
+    angle: str = Form("45"),
+    layout: str = Form("center"),
+    position: str = Form("over"),
+    pages: str = Form(""),
+):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "watermarked.pdf"
+    try:
+        pdf_ops.add_watermark(src, text, size, color, opacity, angle, layout, position, pages, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Watermark failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_watermarked.pdf")
