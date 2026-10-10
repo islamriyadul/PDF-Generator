@@ -488,3 +488,51 @@ def add_watermark(
     except Exception as e:
         raise HTTPException(500, f"Watermark failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + "_watermarked.pdf")
+
+
+@router.post("/pdf-form-info")
+def pdf_form_info(background: BackgroundTasks, file: UploadFile = File(...)):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    try:
+        return {"pages": pdf_ops.pdf_form_info(src)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Preview failed: {e}")
+
+
+@router.post("/fill-pdf-form")
+def fill_pdf_form(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    values: str = Form(...),
+    flatten: str = Form("false"),
+):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "filled.pdf"
+    try:
+        pdf_ops.fill_pdf_form(src, values, flatten == "true", out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Filling failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_filled.pdf")
+
+
+@router.post("/flatten-pdf")
+def flatten_pdf(background: BackgroundTasks, file: UploadFile = File(...)):
+    require_ext([file], (".pdf",))
+    job_dir, src = fs.save_upload(file, ".pdf")
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "flattened.pdf"
+    try:
+        pdf_ops.flatten_form(src, out)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Flatten failed: {e}")
+    return FileResponse(out, filename=Path(file.filename).stem + "_flattened.pdf")

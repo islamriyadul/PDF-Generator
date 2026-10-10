@@ -1274,3 +1274,145 @@ def add_watermark(src: Path, text: str, size: str, color: str, opacity: str,
         doc.save(out, garbage=3, deflate=True)
     finally:
         doc.close()
+
+
+# ---------------------------------------------------------------
+# PDF forms
+# ---------------------------------------------------------------
+MAX_FORM_PAGES = 30
+MAX_FORM_FIELDS = 1000
+_FORM_TYPES = {
+    "Text": "text", "CheckBox": "checkbox", "RadioButton": "radio",
+    "ComboBox": "combo", "ListBox": "list",
+}
+_FORM_KEY = re.compile(r"^\d+:\d+$")
+
+
+def _form_widgets(page):
+    ws = page.widgets()
+    return list(ws) if ws else []
+
+
+def _choices(w):
+    out = []
+    for c in (w.choice_values or []):
+        if isinstance(c, (list, tuple)) and c:
+            out.append({"value": str(c[0]), "label": str(c[-1])})
+        else:
+            out.append({"value": str(c), "label": str(c)})
+    return out
+
+
+def pdf_form_info(src: Path, width: int = 700) -> list[dict]:
+    doc = _open_checked(src)
+    try:
+        if doc.page_count > MAX_FORM_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_FORM_PAGES}). Extract fewer pages first")
+        pages, count = [], 0
+        for pno, page in enumerate(doc, start=1):
+            W, H = max(page.rect.width, 1), max(page.rect.height, 1)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(width / W, width / W), alpha=False)
+            fields = []
+            for idx, w in enumerate(_form_widgets(page)):  # idx counts every widget, as in fill
+                kind = _FORM_TYPES.get(w.field_type_string)
+                if not kind:
+                    continue
+                count += 1
+                if count > MAX_FORM_FIELDS:
+                    raise ValueError(f"Too many form fields (max {MAX_FORM_FIELDS})")
+                r = pymupdf.Rect(w.rect) * page.rotation_matrix
+                r.normalize()
+                v = w.field_value
+                if kind in ("checkbox", "radio"):
+                    value = v is True or (isinstance(v, str) and v not in ("Off", "", "False"))
+                else:
+                    value = "" if v in (None, False) else str(v)
+                fields.append({
+                    "key": f"{pno}:{idx}", "kind": kind, "name": w.field_name or "",
+                    "x": round(r.x0 / W, 5), "y": round(r.y0 / H, 5),
+                    "w": round(r.width / W, 5), "h": round(r.height / H, 5),
+                    "value": value,
+                    "readonly": bool((w.field_flags or 0) & 1),
+                    "multiline": bool((w.field_flags or 0) & 4096),
+                    "maxlen": int(w.text_maxlen or 0) if kind == "text" else 0,
+                    "choices": _choices(w) if kind in ("combo", "list") else [],
+                })
+            pages.append({
+                "img": base64.b64encode(pix.tobytes("jpg", jpg_quality=75)).decode(),
+                "w": round(W, 1), "h": round(H, 1), "fields": fields,
+            })
+        if count == 0:
+            raise ValueError(
+                "This PDF has no fillable form fields. "
+                "Use Edit PDF to type text onto it instead"
+            )
+        return pages
+    finally:
+        doc.close()
+
+
+def _bake(doc):
+    if not hasattr(doc, "bake"):
+        raise ValueError("Flattening needs a newer PyMuPDF. Run: pip install --upgrade pymupdf")
+    doc.bake(annots=False, widgets=True)
+
+
+def fill_pdf_form(src: Path, values_json: str, flatten: bool, out: Path) -> None:
+    try:
+        values = json.loads(values_json)
+    except ValueError:
+        raise ValueError("Invalid form data")
+    if not isinstance(values, dict) or len(values) > MAX_FORM_FIELDS:
+        raise ValueError("Invalid form data")
+    if any(not isinstance(k, str) or not _FORM_KEY.match(k) for k in values):
+        raise ValueError("Invalid form data")
+
+    doc = _open_checked(src)
+    try:
+        if doc.page_count > MAX_FORM_PAGES:
+            raise ValueError(f"Too many pages (max {MAX_FORM_PAGES})")
+        applied = 0
+        for pno, page in enumerate(doc, start=1):
+            for idx, w in enumerate(_form_widgets(page)):
+                key = f"{pno}:{idx}"
+                kind = _FORM_TYPES.get(w.field_type_string)
+                if key not in values or not kind or (w.field_flags or 0) & 1:
+                    continue
+                v = values[key]
+                if kind == "text":
+                    if not isinstance(v, str) or len(v) > 5000:
+                        raise ValueError("Invalid text value")
+                    _check_latin(v.replace("\n", " ").replace("\r", " ").replace("\t", " "))
+                    if w.text_maxlen and len(v) > w.text_maxlen:
+                        raise ValueError(f"'{w.field_name}' allows at most {w.text_maxlen} characters")
+                    w.field_value = v
+                elif kind in ("checkbox", "radio"):
+                    if not isinstance(v, bool):
+                        raise ValueError("Invalid checkbox value")
+                    on = w.on_state()
+                    w.field_value = on if v else "Off"
+                else:
+                    allowed = {c["value"] for c in _choices(w)}
+                    if not isinstance(v, str) or (v and allowed and v not in allowed):
+                        raise ValueError("Invalid choice")
+                    w.field_value = v
+                w.update()
+                applied += 1
+        if applied == 0:
+            raise ValueError("There is nothing to fill in")
+        if flatten:
+            _bake(doc)
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+
+def flatten_form(src: Path, out: Path) -> None:
+    doc = _open_checked(src)
+    try:
+        if not any(_form_widgets(p) for p in doc):
+            raise ValueError("This PDF has no form fields to flatten")
+        _bake(doc)
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()

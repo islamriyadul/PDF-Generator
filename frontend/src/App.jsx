@@ -6,6 +6,7 @@ import Comparer from "./Comparer";
 import Redactor from "./Redactor";
 import Cropper from "./Cropper";
 import EditPdf from "./EditPdf";
+import FormFiller from "./FormFiller";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -191,6 +192,9 @@ const TOOLS = [
       { name: "pages", label: "Only these pages (leave empty for all)", type: "text", placeholder: "e.g. 1-3,5" },
     ],
   },
+  { id: "fill-pdf-form", cat: "Edit", label: "Fill PDF form", desc: "Fill in the fields of a PDF form", custom: "fillform" },
+  { id: "flatten-pdf", cat: "Edit", label: "Flatten PDF form", desc: "Lock form answers into the page", suffix: "_flattened",
+  endpoint: "/tools/flatten-pdf", accept: ".pdf", out: ".pdf" },
 ];
 
 const initialValues = (tool) =>
@@ -353,7 +357,7 @@ function ToolPage() {
     );
   }
 
-  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer />, redact: <Redactor />, crop: <Cropper />, edit: <EditPdf /> };
+  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer />, redact: <Redactor />, crop: <Cropper />, edit: <EditPdf />, fillform: <FormFiller /> };
   return (
     <div style={{ maxWidth: tool.custom ? 1100 : 560, margin: "30px auto", padding: "0 16px" }}>
       <Link to="/">← All tools</Link>
