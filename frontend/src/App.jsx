@@ -7,7 +7,7 @@ import Redactor from "./Redactor";
 import Cropper from "./Cropper";
 import EditPdf from "./EditPdf";
 import FormFiller from "./FormFiller";
-
+import Scanner from "./Scanner";
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 const CATEGORIES = ["All", "Convert", "Organize", "Optimize", "Security", "Edit"];
@@ -195,6 +195,7 @@ const TOOLS = [
   { id: "fill-pdf-form", cat: "Edit", label: "Fill PDF form", desc: "Fill in the fields of a PDF form", custom: "fillform" },
   { id: "flatten-pdf", cat: "Edit", label: "Flatten PDF form", desc: "Lock form answers into the page", suffix: "_flattened",
   endpoint: "/tools/flatten-pdf", accept: ".pdf", out: ".pdf" },
+  { id: "scan-to-pdf", cat: "Convert", label: "Scan to PDF", desc: "Turn camera shots or photos into a clean PDF", custom: "scan" },
 ];
 
 const initialValues = (tool) =>
@@ -357,7 +358,7 @@ function ToolPage() {
     );
   }
 
-  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer />, redact: <Redactor />, crop: <Cropper />, edit: <EditPdf />, fillform: <FormFiller /> };
+  const CUSTOM = { organizer: <Organizer />, sign: <SignPdf />, compare: <Comparer />, redact: <Redactor />, crop: <Cropper />, edit: <EditPdf />, fillform: <FormFiller />, scan: <Scanner /> };
   return (
     <div style={{ maxWidth: tool.custom ? 1100 : 560, margin: "30px auto", padding: "0 16px" }}>
       <Link to="/">← All tools</Link>

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pymupdf
 from openpyxl import Workbook
-from PIL import Image, ImageChops, ImageDraw, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
@@ -1413,6 +1413,99 @@ def flatten_form(src: Path, out: Path) -> None:
         if not any(_form_widgets(p) for p in doc):
             raise ValueError("This PDF has no form fields to flatten")
         _bake(doc)
+        doc.save(out, garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+# ---------------------------------------------------------------
+# Scan to PDF
+# ---------------------------------------------------------------
+MAX_SCAN_PAGES = 30
+SCAN_FILTERS = {"original", "enhanced", "gray", "bw"}
+
+
+def _scan_open(stream):
+    try:
+        img = Image.open(stream)
+        if img.width * img.height > 50_000_000:
+            raise ValueError("An image is too large")
+        img.load()
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("One of the files is not a valid image")
+    img = ImageOps.exif_transpose(img)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGB", img.size, "white")
+        bg.paste(img, mask=img.getchannel("A"))
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    img.thumbnail((2600, 2600))  # plenty for a printed page, keeps files small
+    return img
+
+
+def _scan_enhance(img, mode):
+    if mode == "original":
+        return img
+    if mode == "enhanced":
+        img = ImageOps.autocontrast(img, cutoff=1)
+        return img.filter(ImageFilter.UnsharpMask(radius=2, percent=80, threshold=3))
+    gray = ImageOps.grayscale(img)
+    if mode == "gray":
+        return ImageOps.autocontrast(gray, cutoff=1).convert("RGB")
+
+    # "bw": estimate the paper background, divide it out, then threshold
+    import numpy as np
+    w, h = gray.size
+    small = gray.resize((max(w // 8, 1), max(h // 8, 1)))
+    small = small.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(10))
+    bg = small.resize((w, h))
+    g = np.asarray(gray, dtype=np.float32)
+    b = np.asarray(bg, dtype=np.float32)
+    norm = np.clip(g / np.maximum(b, 1) * 255, 0, 255)
+    out = np.where(norm < 170, 0, 255).astype(np.uint8)
+    return Image.fromarray(out).convert("RGB")
+
+
+def scan_to_pdf(streams: list, plan_json: str, out: Path, size="a4", margin="small") -> None:
+    if not 1 <= len(streams) <= MAX_SCAN_PAGES:
+        raise ValueError(f"Use between 1 and {MAX_SCAN_PAGES} pages")
+    if size not in (*PAGE_SIZES, "fit"):
+        raise ValueError("Unknown page size")
+    if margin not in MARGINS:
+        raise ValueError("Unknown margin")
+    try:
+        plan = json.loads(plan_json)
+    except ValueError:
+        raise ValueError("Invalid page settings")
+    if not isinstance(plan, list) or len(plan) != len(streams):
+        raise ValueError("Invalid page settings")
+
+    doc = pymupdf.open()
+    try:
+        for stream, item in zip(streams, plan):
+            if not isinstance(item, dict):
+                raise ValueError("Invalid page settings")
+            rot, mode = item.get("rotate", 0), item.get("filter", "enhanced")
+            if isinstance(rot, bool) or rot not in (0, 90, 180, 270):
+                raise ValueError("Rotation must be 0, 90, 180 or 270")
+            if mode not in SCAN_FILTERS:
+                raise ValueError("Unknown filter")
+
+            img = _scan_open(stream)
+            if rot:
+                img = img.rotate(-rot, expand=True)  # PIL turns counter-clockwise
+            img = _scan_enhance(img, mode)
+
+            buf = io.BytesIO()
+            if mode == "bw":
+                img.save(buf, "PNG")
+            else:
+                img.save(buf, "JPEG", quality=85)
+            _add_image_page(doc, img.width, img.height, buf.getvalue(),
+                            size, "auto", MARGINS[margin])
         doc.save(out, garbage=3, deflate=True)
     finally:
         doc.close()

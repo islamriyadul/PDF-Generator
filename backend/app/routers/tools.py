@@ -536,3 +536,40 @@ def flatten_pdf(background: BackgroundTasks, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(500, f"Flatten failed: {e}")
     return FileResponse(out, filename=Path(file.filename).stem + "_flattened.pdf")
+
+
+@router.post("/scan-to-pdf")
+def scan_to_pdf(
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    plan: str = Form(...),
+    size: str = Form("a4"),
+    margin: str = Form("small"),
+    ocr: str = Form("false"),
+    lang: str = Form("eng"),
+):
+    require_ext(files, (".jpg", ".jpeg", ".png", ".webp"))
+    for f in files:
+        if f.size and f.size > MAX_SIZE:
+            raise HTTPException(413, f"{f.filename} is too large (max 20 MB)")
+    use_ocr = ocr == "true"
+    if use_ocr:
+        requested = lang.split("+")
+        installed = set(pdf_tools.list_ocr_langs())
+        if not (1 <= len(requested) <= 3) or any(l not in installed for l in requested):
+            raise HTTPException(400, "Unsupported language")
+
+    job_dir = fs.new_job()
+    background.add_task(fs.cleanup, job_dir)
+    out = job_dir / "scan.pdf"
+    try:
+        pdf_ops.scan_to_pdf([f.file for f in files], plan, out, size, margin)
+        if use_ocr:
+            searchable = job_dir / "scan_ocr.pdf"
+            pdf_tools.ocr_pdf(out, lang, searchable)
+            out = searchable
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Scan failed: {e}")
+    return FileResponse(out, filename="scan.pdf")
