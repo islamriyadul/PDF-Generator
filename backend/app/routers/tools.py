@@ -7,6 +7,7 @@ from app.core.config import MAX_SIZE
 from app.services import files as fs
 from app.services import pdf_ops
 from app.services import pdf_tools
+from app.services import scan_sessions
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -573,3 +574,38 @@ def scan_to_pdf(
     except Exception as e:
         raise HTTPException(500, f"Scan failed: {e}")
     return FileResponse(out, filename="scan.pdf")
+
+@router.post("/scan-session")
+def scan_session_create():
+    pc, phone = scan_sessions.create()
+    return {"pc": pc, "phone": phone, "lan_ip": scan_sessions.lan_ip()}
+
+
+@router.get("/scan-session/{pc}")
+def scan_session_status(pc: str):
+    return scan_sessions.pc_status(pc)
+
+
+@router.get("/scan-session/{pc}/page/{n}")
+def scan_session_page(pc: str, n: int):
+    return FileResponse(scan_sessions.page_path(pc, n))
+
+
+@router.delete("/scan-session/{pc}")
+def scan_session_close(pc: str):
+    scan_sessions.close(pc)
+    return {"ok": True}
+
+
+@router.get("/scan-phone/{phone}/status")
+def scan_phone_status(phone: str):
+    return {"count": scan_sessions.phone_status(phone)}
+
+
+@router.post("/scan-phone/{phone}/upload")
+def scan_phone_upload(phone: str, file: UploadFile = File(...)):
+    return {"count": scan_sessions.add_page(phone, file.file)}
+
+@router.get("/lan-ip")
+def lan_ip():
+    return {"ip": scan_sessions.lan_ip()}
